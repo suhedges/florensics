@@ -1,16 +1,22 @@
-/* ============================
-   CONFIG
-   ============================ */
+/* app.js — Lead Forensics widget (via Cloudflare Worker proxy)
+   Assumptions:
+   - Your Cloudflare Worker forwards requests to https://interact.leadforensics.com
+   - Your Worker injects headers:
+       Authorization-Token: <API key>
+       ClientID: <Client ID>
+   - Your frontend calls the Worker (no keys in browser)
+*/
 
-// 1) Set your proxy endpoint here (recommended).
-// Example: https://your-worker.yourdomain.com
-// The proxy is what uses CLIENT_ID/API_KEY stored securely on the server side.
-const PROXY_URL = ""; // <-- set to your proxy when ready
+const WORKER_BASE = "https://leadforensics-proxy.sethh.workers.dev";
 
-// 2) Rep list + 3-letter codes (case-insensitive)
-const REPS = {
+// 360x320 to 360x690 friendly defaults
+const DEFAULT_PAGE_SIZE = 25;
+const DEFAULT_RANGE_DAYS = 7;
+
+// 3-letter rep codes (case-insensitive). Adjust anytime.
+const REP_CODES = {
   AOS: "Andrew Osborne",
-  APL: "Andy Polson",
+  APO: "Andy Polson",
   BDE: "Brad Dedric",
   BME: "Brian Meredith",
   CWE: "Chris Westerman",
@@ -27,413 +33,526 @@ const REPS = {
   MEL: "Mike Elsner",
   RRE: "Rick Redelman",
   RWI: "Robert Wilson",
-  RLO: "Ron Loyd"
+  RLO: "Ron Loyd",
 };
 
-// Storage keys
-const LS_REP = "lf_rep_code";
-const LS_RANGE = "lf_range";
+// ---------- tiny DOM helpers ----------
+const $ = (sel) => document.querySelector(sel);
+const $$ = (sel) => Array.from(document.querySelectorAll(sel));
 
-// Minimal state
-const state = {
-  repCode: null,
-  range: "7d",
-  data: null,
-  filterMode: "all" // placeholder if you want: all/leads/visits
-};
-
-/* ============================
-   DOM
-   ============================ */
-
-const $ = (id) => document.getElementById(id);
-
-const signinPanel = $("signinPanel");
-const dashPanel = $("dashPanel");
-
-const repCodeInput = $("repCode");
-const btnSignIn = $("btnSignIn");
-const btnSignOut = $("btnSignOut");
-
-const repPill = $("repPill");
-const rangeSelect = $("rangeSelect");
-
-const btnRefresh = $("btnRefresh");
-const btnSettings = $("btnSettings");
-const btnShowCodes = $("btnShowCodes");
-const btnFilter = $("btnFilter");
-
-const activityList = $("activityList");
-
-const valNew = $("valNew");
-const valVisits = $("valVisits");
-const valReturning = $("valReturning");
-
-const overlay = $("overlay");
-const modalTitle = $("modalTitle");
-const modalBody = $("modalBody");
-const btnCloseModal = $("btnCloseModal");
-
-const statusDot = $("statusDot");
-const statusText = $("statusText");
-
-/* ============================
-   UTIL
-   ============================ */
-
-function setStatus(type, text){
-  statusDot.classList.remove("good","warn","bad");
-  if(type) statusDot.classList.add(type);
-  statusText.textContent = text;
+function setText(sel, txt) {
+  const el = $(sel);
+  if (el) el.textContent = txt ?? "";
 }
 
-function normalizeCode(raw){
-  return (raw || "").trim().toUpperCase();
+function show(sel) {
+  const el = $(sel);
+  if (el) el.classList.remove("hidden");
 }
 
-function timeAgo(iso){
-  if(!iso) return "—";
-  const ms = Date.now() - new Date(iso).getTime();
-  const m = Math.floor(ms/60000);
-  if(m < 1) return "now";
-  if(m < 60) return `${m}m`;
-  const h = Math.floor(m/60);
-  if(h < 24) return `${h}h`;
-  const d = Math.floor(h/24);
-  return `${d}d`;
+function hide(sel) {
+  const el = $(sel);
+  if (el) el.classList.add("hidden");
 }
 
-function escapeHtml(s){
-  return String(s ?? "")
-    .replaceAll("&","&amp;")
-    .replaceAll("<","&lt;")
-    .replaceAll(">","&gt;")
-    .replaceAll('"',"&quot;")
-    .replaceAll("'","&#039;");
+function toast(msg) {
+  const el = $("#toast");
+  if (!el) return alert(msg);
+  el.textContent = msg;
+  el.classList.add("show");
+  setTimeout(() => el.classList.remove("show"), 2200);
 }
 
-/* ============================
-   MODAL
-   ============================ */
-
-function openModal(title, html){
-  modalTitle.textContent = title;
-  modalBody.innerHTML = html;
-  overlay.classList.remove("hidden");
-  overlay.setAttribute("aria-hidden","false");
+// ---------- date helpers ----------
+function pad2(n) {
+  return String(n).padStart(2, "0");
 }
 
-function closeModal(){
-  overlay.classList.add("hidden");
-  overlay.setAttribute("aria-hidden","true");
-}
-
-overlay.addEventListener("click", (e)=>{
-  if(e.target === overlay) closeModal();
-});
-btnCloseModal.addEventListener("click", closeModal);
-
-/* ============================
-   DATA LAYER
-   ============================ */
-
-/**
- * Expected proxy endpoint:
- * GET  /activity?rep=AOS&range=7d
- *
- * Should return JSON shaped like:
- * {
- *   rep: { code:"AOS", name:"Andrew Osborne" },
- *   summary: { newLeads: 3, totalVisits: 25, returning: 12 },
- *   recent: [
- *     { id:"evt1", ts:"2026-01-09T14:04:00Z", company:"Acme Co", page:"/bearings/6205", kind:"visit", note:"3 pages" }
- *   ]
- * }
- *
- * Optional:
- * GET /company?rep=AOS&id=123   (for deeper details)
- */
-async function fetchActivity(repCode, range){
-  // If proxy not configured, use demo data
-  if(!PROXY_URL){
-    return demoData(repCode, range);
+// Lead Forensics docs commonly show dd-mm-yyyy HH:MM:SS
+function lfDateTime(d, endOfDay = false) {
+  const dt = new Date(d);
+  if (endOfDay) {
+    dt.setHours(23, 59, 59, 0);
+  } else {
+    dt.setHours(0, 0, 0, 0);
   }
-
-  const url = new URL(PROXY_URL.replace(/\/$/,"") + "/activity");
-  url.searchParams.set("rep", repCode);
-  url.searchParams.set("range", range);
-
-  const res = await fetch(url.toString(), {
-    method: "GET",
-    headers: { "Accept":"application/json" }
-  });
-
-  if(!res.ok){
-    const txt = await res.text().catch(()=> "");
-    throw new Error(`Proxy error ${res.status}: ${txt || res.statusText}`);
-  }
-  return res.json();
+  const dd = pad2(dt.getDate());
+  const mm = pad2(dt.getMonth() + 1);
+  const yyyy = dt.getFullYear();
+  const hh = pad2(dt.getHours());
+  const mi = pad2(dt.getMinutes());
+  const ss = pad2(dt.getSeconds());
+  return `${dd}-${mm}-${yyyy} ${hh}:${mi}:${ss}`;
 }
 
-function demoData(repCode, range){
-  const name = REPS[repCode] || "Unknown Rep";
-  // simple deterministic-ish demo
-  const seed = repCode.split("").reduce((a,c)=>a+c.charCodeAt(0),0) + (range==="24h"?1:range==="7d"?7:30);
-  const newLeads = (seed % 5) + 1;
-  const totalVisits = (seed % 20) + 10;
-  const returning = Math.max(0, totalVisits - newLeads - 4);
-
-  const now = Date.now();
-  const rec = Array.from({length: 9}, (_,i)=> {
-    const minsAgo = (i*37 + seed) % 1400;
-    const ts = new Date(now - minsAgo*60000).toISOString();
-    const companies = ["Ahlstrom","ACME Manufacturing","Blue River Tooling","Delta Packaging","Evergreen Supply","Frontier Hydraulics","Great Lakes Paper","Henderson Foundry","IronWorks MRO"];
-    const pages = ["/bearings/6205","/belts/3vx","/seals/viton","/couplings/lovejoy","/lubrication/grease","/pulleys/sheaves","/hydraulics/fittings","/shop/checkout","/contact"];
-    const company = companies[(seed + i) % companies.length];
-    const page = pages[(seed*3 + i) % pages.length];
-    const kind = (i % 3 === 0) ? "new" : "visit";
-    const note = (kind === "new") ? "New lead" : `${(seed+i)%6+1} pages`;
-    return { id:`demo-${i}`, ts, company, page, kind, note };
-  });
-
+function rangeFromDays(days) {
+  const end = new Date();
+  const start = new Date();
+  start.setDate(end.getDate() - days);
   return {
-    rep: { code: repCode, name },
-    summary: { newLeads, totalVisits, returning },
-    recent: rec
+    datefrom: lfDateTime(start, false),
+    dateto: lfDateTime(end, true),
   };
 }
 
-/* ============================
-   RENDER
-   ============================ */
+// ---------- fetch wrapper ----------
+async function lfFetch(path, params = {}) {
+  const url = new URL(WORKER_BASE.replace(/\/$/, "") + path);
 
-function renderRepPill(){
-  const name = REPS[state.repCode] || "Unknown";
-  repPill.innerHTML = `
-    <span class="mini" aria-hidden="true">
-      <svg viewBox="0 0 24 24"><path d="M12 12a4 4 0 1 0-4-4 4 4 0 0 0 4 4zm0 2c-3.33 0-8 1.67-8 5v1h16v-1c0-3.33-4.67-5-8-5z"/></svg>
-    </span>
-    <span class="rep-name">${escapeHtml(state.repCode)} • ${escapeHtml(name)}</span>
+  // attach params
+  Object.entries(params).forEach(([k, v]) => {
+    if (v === undefined || v === null || v === "") return;
+    url.searchParams.set(k, String(v));
+  });
+
+  const res = await fetch(url.toString(), {
+    method: "GET",
+    headers: { Accept: "application/json" },
+    cache: "no-store",
+  });
+
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`LeadForensics proxy error ${res.status}: ${body.slice(0, 200)}`);
+  }
+
+  // Some endpoints may return text/json; try json first
+  const text = await res.text();
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
+}
+
+// ---------- response normalization ----------
+function asArray(maybeArray) {
+  if (Array.isArray(maybeArray)) return maybeArray;
+
+  // Common LF patterns
+  if (maybeArray && typeof maybeArray === "object") {
+    const keys = Object.keys(maybeArray);
+    // pick first array-like property
+    for (const k of keys) {
+      if (Array.isArray(maybeArray[k])) return maybeArray[k];
+    }
+  }
+  return [];
+}
+
+function pick(obj, keys, fallback = "") {
+  if (!obj || typeof obj !== "object") return fallback;
+  for (const k of keys) {
+    if (obj[k] !== undefined && obj[k] !== null && obj[k] !== "") return obj[k];
+  }
+  return fallback;
+}
+
+function safeUpper(s) {
+  return String(s || "").trim().toUpperCase();
+}
+
+// ---------- state ----------
+const state = {
+  repCode: null,
+  repName: null,
+  clientUserId: null,
+  rangeDays: DEFAULT_RANGE_DAYS,
+  assignedToCache: null,
+  businesses: [],
+};
+
+// ---------- Lead Forensics calls ----------
+async function getAssignedToList() {
+  if (state.assignedToCache) return state.assignedToCache;
+  const data = await lfFetch("/WebApi_v2/Reference/GetAssignedToList");
+  const arr = asArray(data);
+  state.assignedToCache = arr;
+  return arr;
+}
+
+function resolveClientUserId(assignedToList, repName) {
+  const target = String(repName || "").trim().toLowerCase();
+
+  // Try common fields
+  const found = assignedToList.find((u) => {
+    const name = String(
+      pick(u, ["ClientUserName", "AssignedTo", "Name", "UserName", "FullName"], "")
+    ).toLowerCase();
+    return name === target;
+  });
+
+  return found
+    ? pick(found, ["ClientUserID", "ClientUserId", "AssignedToID", "UserId", "ID"], null)
+    : null;
+}
+
+async function getBusinessesByAssignedTo(clientuserid, days, pageSize = DEFAULT_PAGE_SIZE, pageNo = 1) {
+  const { datefrom, dateto } = rangeFromDays(days);
+
+  // Most LF endpoints use DateFrom/DateTo; some use lowercase.
+  // We'll send lowercase keys; if your Worker normalizes, either works.
+  const data = await lfFetch("/WebApi_v2/Business/GetBusinessesByAssignedTo", {
+    clientuserid,
+    datefrom,
+    dateto,
+    pagesize: pageSize,
+    pageno: pageNo,
+  });
+
+  // Try to find list
+  const list =
+    asArray(data) ||
+    asArray(pick(data, ["BusinessList", "Businesses", "Business", "Results"], [])) ||
+    [];
+
+  return list;
+}
+
+async function getBusiness(businessid) {
+  return lfFetch("/WebApi_v2/Business/GetBusiness", { businessid });
+}
+
+// Optional (enable if you want a “recent visits” list in the modal)
+async function getVisitsByBusiness(businessid, days = 30, pageSize = 10, pageNo = 1) {
+  const { datefrom, dateto } = rangeFromDays(days);
+  const data = await lfFetch("/WebApi_v2/Visit/GetVisitsByBusiness", {
+    businessid,
+    datefrom,
+    dateto,
+    pagesize: pageSize,
+    pageno: pageNo,
+  });
+  return asArray(data);
+}
+
+// ---------- UI rendering ----------
+function renderSignedOut() {
+  show("#screenLogin");
+  hide("#screenMain");
+  setText("#repBadge", "");
+}
+
+function renderSignedIn() {
+  hide("#screenLogin");
+  show("#screenMain");
+  setText("#repBadge", state.repCode);
+  setText("#repName", state.repName);
+  setText("#rangeLabel", `${state.rangeDays}d`);
+}
+
+function renderLoading(isLoading) {
+  const btn = $("#btnRefresh");
+  if (btn) btn.disabled = !!isLoading;
+  if (isLoading) show("#loading");
+  else hide("#loading");
+}
+
+function businessCard(b) {
+  const name = pick(b, ["BusinessName", "Name", "CompanyName", "Business"], "Unknown Company");
+  const city = pick(b, ["City", "Town", "LocationCity"], "");
+  const stateProv = pick(b, ["State", "Region", "County", "StateProvince"], "");
+  const country = pick(b, ["Country", "CountryName"], "");
+  const loc = [city, stateProv, country].filter(Boolean).join(", ");
+
+  const lastVisit = pick(b, ["LastVisitDate", "MostRecentVisitDate", "LastVisited", "VisitDate"], "");
+  const visits = pick(b, ["NumberOfVisits", "VisitCount", "Visits", "TotalVisits"], "");
+  const pages = pick(b, ["PageViews", "PagesViewed", "TotalPageViews"], "");
+
+  const id = pick(b, ["BusinessID", "BusinessId", "ID", "Id"], null);
+
+  return `
+    <button class="bizCard" data-bizid="${id ?? ""}">
+      <div class="bizTop">
+        <div class="bizName" title="${escapeHtml(name)}">${escapeHtml(name)}</div>
+        <div class="bizPills">
+          ${visits !== "" ? `<span class="pill" title="Visits">${escapeHtml(String(visits))}V</span>` : ""}
+          ${pages !== "" ? `<span class="pill" title="Pages">${escapeHtml(String(pages))}P</span>` : ""}
+        </div>
+      </div>
+      <div class="bizMeta">
+        ${loc ? `<span class="muted" title="Location">${escapeHtml(loc)}</span>` : `<span class="muted"> </span>`}
+        ${lastVisit ? `<span class="muted" title="Last activity">${escapeHtml(String(lastVisit))}</span>` : `<span class="muted"> </span>`}
+      </div>
+    </button>
   `;
 }
 
-function iconFor(kind){
-  // inline SVG icons
-  if(kind === "new"){
-    return `<svg viewBox="0 0 24 24"><path d="M12 12a4 4 0 1 0-4-4 4 4 0 0 0 4 4zm0 2c-3.33 0-8 1.67-8 5v1h10.5a6.5 6.5 0 0 1-.63-2.75c0-.77.13-1.52.38-2.25H12zM18 13v-2h-2v2h-2v2h2v2h2v-2h2v-2h-2z"/></svg>`;
-  }
-  return `<svg viewBox="0 0 24 24"><path d="M12 8a4 4 0 1 0 4 4 4 4 0 0 0-4-4zm0-6C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18a8 8 0 1 1 8-8 8 8 0 0 1-8 8z"/></svg>`;
-}
+function renderBusinesses(list) {
+  const wrap = $("#bizList");
+  if (!wrap) return;
 
-function render(){
-  if(!state.data) return;
-
-  const { summary, recent } = state.data;
-
-  valNew.textContent = summary?.newLeads ?? "—";
-  valVisits.textContent = summary?.totalVisits ?? "—";
-  valReturning.textContent = summary?.returning ?? "—";
-
-  // render list
-  activityList.innerHTML = "";
-
-  const items = (recent || []).slice(0, 50);
-
-  if(items.length === 0){
-    activityList.innerHTML = `<div class="row" style="cursor:default; opacity:.8">
-      <div class="row-main">
-        <div class="company">No activity</div>
-        <div class="row-bot">Try a different date range.</div>
-      </div>
-    </div>`;
+  if (!list.length) {
+    wrap.innerHTML = `<div class="empty">No assigned activity in this range.</div>`;
     return;
   }
 
-  for(const evt of items){
-    const row = document.createElement("div");
-    row.className = "row";
-    row.setAttribute("role","listitem");
-    row.innerHTML = `
-      <div class="badge" aria-hidden="true">${iconFor(evt.kind)}</div>
-      <div class="row-main">
-        <div class="row-top">
-          <div class="company">${escapeHtml(evt.company || "Unknown company")}</div>
-          <div class="meta">${timeAgo(evt.ts)}</div>
-        </div>
-        <div class="row-bot">${escapeHtml(evt.note || evt.page || "")}</div>
+  // Sort by “last visit” if possible
+  const sorted = [...list].sort((a, b) => {
+    const av = Date.parse(pick(a, ["LastVisitDate", "MostRecentVisitDate", "VisitDate"], "")) || 0;
+    const bv = Date.parse(pick(b, ["LastVisitDate", "MostRecentVisitDate", "VisitDate"], "")) || 0;
+    return bv - av;
+  });
+
+  wrap.innerHTML = sorted.map(businessCard).join("");
+
+  // click handler
+  $$("#bizList .bizCard").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const bizId = btn.getAttribute("data-bizid");
+      if (!bizId) return toast("No business ID found for this item.");
+      await openBusinessModal(bizId);
+    });
+  });
+}
+
+// ---------- modal ----------
+async function openBusinessModal(businessid) {
+  show("#modalOverlay");
+  setText("#modalTitle", "Loading…");
+  setText("#modalSubtitle", "");
+  const body = $("#modalBody");
+  if (body) body.innerHTML = `<div class="modalLoading">Fetching company details…</div>`;
+
+  try {
+    const details = await getBusiness(businessid);
+
+    const name = pick(details, ["BusinessName", "Name", "CompanyName"], "Company");
+    const website = pick(details, ["Website", "WebSite", "Url", "URL"], "");
+    const phone = pick(details, ["Phone", "Telephone", "PhoneNumber"], "");
+    const industry = pick(details, ["Industry", "IndustryName"], "");
+    const address = [
+      pick(details, ["Address1", "AddressLine1"], ""),
+      pick(details, ["Address2", "AddressLine2"], ""),
+      pick(details, ["City"], ""),
+      pick(details, ["State", "Region"], ""),
+      pick(details, ["Postcode", "Zip"], ""),
+      pick(details, ["Country"], ""),
+    ]
+      .filter(Boolean)
+      .join(", ");
+
+    setText("#modalTitle", name);
+    setText("#modalSubtitle", industry ? String(industry) : "");
+
+    let html = `
+      <div class="detailGrid">
+        ${website ? detailRow("Website", linkHtml(website)) : ""}
+        ${phone ? detailRow("Phone", escapeHtml(phone)) : ""}
+        ${address ? detailRow("Address", escapeHtml(address)) : ""}
       </div>
     `;
 
-    row.addEventListener("click", ()=> {
-      const title = evt.company || "Details";
-      const html = `
-        <div class="kv">
-          <div class="k">Type</div><div class="v">${escapeHtml(evt.kind || "—")}</div>
-          <div class="k">When</div><div class="v">${escapeHtml(new Date(evt.ts).toLocaleString())}</div>
-          <div class="k">Page</div><div class="v">${escapeHtml(evt.page || "—")}</div>
-        </div>
-        <div class="pills">
-          <span class="pill">${escapeHtml(state.data.rep?.code || "")}</span>
-          <span class="pill">${escapeHtml(state.range)}</span>
-          <span class="pill">${escapeHtml(evt.note || "activity")}</span>
-        </div>
-        <div style="opacity:.9">
-          Tip: add “Open in Lead Forensics” here once your proxy returns a portal URL for the company/visit.
-        </div>
-      `;
-      openModal(title, html);
-    });
+    // OPTIONAL: recent visits
+    // NOTE: This can increase API calls; keep pageSize low.
+    try {
+      const visits = await getVisitsByBusiness(businessid, 30, 6, 1);
+      if (visits.length) {
+        const rows = visits
+          .slice(0, 6)
+          .map((v) => {
+            const dt = pick(v, ["VisitDate", "Date", "StartDate"], "");
+            const pages = pick(v, ["PageViews", "Pages", "PagesViewed"], "");
+            const ref = pick(v, ["Referrer", "ReferringSite", "ReferringURL"], "");
+            return `
+              <div class="visitRow">
+                <div class="visitDt">${escapeHtml(String(dt || ""))}</div>
+                <div class="visitMeta">
+                  ${pages !== "" ? `<span class="pill">${escapeHtml(String(pages))}P</span>` : ""}
+                  ${ref ? `<span class="muted clamp" title="${escapeHtml(ref)}">${escapeHtml(ref)}</span>` : ""}
+                </div>
+              </div>
+            `;
+          })
+          .join("");
 
-    activityList.appendChild(row);
+        html += `
+          <div class="section">
+            <div class="sectionTitle">Recent visits (30d)</div>
+            <div class="visitList">${rows}</div>
+          </div>
+        `;
+      }
+    } catch {
+      // ignore if endpoint not enabled in your tenant
+    }
+
+    if (body) body.innerHTML = html;
+  } catch (e) {
+    if (body) body.innerHTML = `<div class="empty">Could not load details. ${escapeHtml(e.message)}</div>`;
   }
 }
 
-/* ============================
-   FLOW
-   ============================ */
-
-async function loadAndRender(){
-  try{
-    setStatus("warn", "Loading…");
-    const data = await fetchActivity(state.repCode, state.range);
-    state.data = data;
-    renderRepPill();
-    render();
-    setStatus("good", PROXY_URL ? "Live" : "Demo data (set PROXY_URL)");
-  }catch(err){
-    console.error(err);
-    setStatus("bad", "Error loading");
-    openModal("Couldn’t load", `
-      <div class="kv">
-        <div class="k">Rep</div><div class="v">${escapeHtml(state.repCode || "")}</div>
-        <div class="k">Range</div><div class="v">${escapeHtml(state.range)}</div>
-      </div>
-      <div style="color:rgba(255,255,255,.85); margin-top:8px">
-        ${escapeHtml(err.message || String(err))}
-      </div>
-      <div style="margin-top:10px; opacity:.85">
-        If you’re using GitHub Pages, you’ll need a server-side proxy (Cloudflare Worker / Netlify Function) to hold the API key.
-      </div>
-    `);
-  }
+function closeModal() {
+  hide("#modalOverlay");
 }
 
-function signIn(repCode){
-  const code = normalizeCode(repCode);
-  if(code.length !== 3){
-    openModal("Invalid code", "Enter a 3-letter code (case-insensitive).");
-    return;
-  }
-  if(!REPS[code]){
-    openModal("Unknown rep code", `
-      <div style="margin-bottom:8px">That code isn’t in the allowed list.</div>
-      <div class="pills">${Object.keys(REPS).map(c=>`<span class="pill">${c}</span>`).join("")}</div>
-    `);
-    return;
-  }
-
-  state.repCode = code;
-  localStorage.setItem(LS_REP, code);
-
-  signinPanel.classList.add("hidden");
-  dashPanel.classList.remove("hidden");
-
-  loadAndRender();
+function detailRow(label, valueHtml) {
+  return `
+    <div class="detailRow">
+      <div class="detailLabel">${escapeHtml(label)}</div>
+      <div class="detailValue">${valueHtml}</div>
+    </div>
+  `;
 }
 
-function signOut(){
+function linkHtml(url) {
+  const safe = String(url).startsWith("http") ? url : `https://${url}`;
+  return `<a class="link" href="${escapeAttr(safe)}" target="_blank" rel="noopener">Open</a>`;
+}
+
+// ---------- auth / sign-in ----------
+function loadSession() {
+  const repCode = localStorage.getItem("lf_repCode");
+  const repName = localStorage.getItem("lf_repName");
+  const clientUserId = localStorage.getItem("lf_clientUserId");
+  const rangeDays = parseInt(localStorage.getItem("lf_rangeDays") || "", 10);
+
+  if (repCode && repName && clientUserId) {
+    state.repCode = repCode;
+    state.repName = repName;
+    state.clientUserId = clientUserId;
+    state.rangeDays = Number.isFinite(rangeDays) ? rangeDays : DEFAULT_RANGE_DAYS;
+    return true;
+  }
+  return false;
+}
+
+function saveSession() {
+  localStorage.setItem("lf_repCode", state.repCode || "");
+  localStorage.setItem("lf_repName", state.repName || "");
+  localStorage.setItem("lf_clientUserId", state.clientUserId || "");
+  localStorage.setItem("lf_rangeDays", String(state.rangeDays || DEFAULT_RANGE_DAYS));
+}
+
+function clearSession() {
+  localStorage.removeItem("lf_repCode");
+  localStorage.removeItem("lf_repName");
+  localStorage.removeItem("lf_clientUserId");
+  localStorage.removeItem("lf_rangeDays");
   state.repCode = null;
-  state.data = null;
-  localStorage.removeItem(LS_REP);
-
-  dashPanel.classList.add("hidden");
-  signinPanel.classList.remove("hidden");
-  repCodeInput.value = "";
-  setStatus(null, "Ready");
+  state.repName = null;
+  state.clientUserId = null;
+  state.businesses = [];
 }
 
-/* ============================
-   EVENTS
-   ============================ */
+// ---------- main refresh ----------
+async function refresh() {
+  if (!state.clientUserId) return;
 
-btnSignIn.addEventListener("click", ()=> signIn(repCodeInput.value));
-repCodeInput.addEventListener("keydown", (e)=>{
-  if(e.key === "Enter") signIn(repCodeInput.value);
-});
+  renderLoading(true);
+  try {
+    const businesses = await getBusinessesByAssignedTo(state.clientUserId, state.rangeDays, DEFAULT_PAGE_SIZE, 1);
+    state.businesses = businesses;
 
-btnSignOut.addEventListener("click", signOut);
+    renderBusinesses(businesses);
 
-rangeSelect.addEventListener("change", ()=>{
-  state.range = rangeSelect.value;
-  localStorage.setItem(LS_RANGE, state.range);
-  if(state.repCode) loadAndRender();
-});
-
-btnRefresh.addEventListener("click", ()=>{
-  if(state.repCode) loadAndRender();
-});
-
-btnSettings.addEventListener("click", ()=>{
-  const html = `
-    <div class="kv">
-      <div class="k">Rep</div><div class="v">${escapeHtml(state.repCode || "—")}</div>
-      <div class="k">Range</div><div class="v">${escapeHtml(state.range)}</div>
-      <div class="k">Mode</div><div class="v">${PROXY_URL ? "Live" : "Demo"}</div>
-    </div>
-    <div style="margin-bottom:10px">
-      <strong>Proxy URL</strong><br/>
-      <span style="opacity:.9">${escapeHtml(PROXY_URL || "(not set)")}</span>
-    </div>
-    <div style="opacity:.9">
-      GitHub repo secrets won’t be accessible from browser JS. Use a server-side proxy to keep API keys private.
-    </div>
-  `;
-  openModal("Settings", html);
-});
-
-btnShowCodes.addEventListener("click", ()=>{
-  const html = `
-    <div style="margin-bottom:8px; opacity:.9">Rep codes</div>
-    <div class="pills">
-      ${Object.entries(REPS).map(([code,name]) => `<span class="pill" title="${escapeHtml(name)}">${code}</span>`).join("")}
-    </div>
-    <div style="margin-top:8px; opacity:.85">
-      You can change codes in <code>app.js</code> (REPS map).
-    </div>
-  `;
-  openModal("Codes", html);
-});
-
-btnFilter.addEventListener("click", ()=>{
-  openModal("Filters", `
-    <div class="kv">
-      <div class="k">Coming soon</div><div class="v">Compact filters</div>
-    </div>
-    <div style="opacity:.9">
-      Add toggles like “New only”, “Visits only”, or “Exclude known customers” once your proxy returns that metadata.
-    </div>
-  `);
-});
-
-/* ============================
-   INIT
-   ============================ */
-
-(function init(){
-  // restore range
-  const savedRange = localStorage.getItem(LS_RANGE);
-  if(savedRange) state.range = savedRange;
-  rangeSelect.value = state.range;
-
-  // restore rep
-  const savedRep = localStorage.getItem(LS_REP);
-  if(savedRep && REPS[savedRep]){
-    signinPanel.classList.add("hidden");
-    dashPanel.classList.remove("hidden");
-    state.repCode = savedRep;
-    renderRepPill();
-    loadAndRender();
-  }else{
-    setStatus(null, "Ready");
+    setText("#kpiCount", businesses.length ? String(businesses.length) : "0");
+  } catch (e) {
+    toast(e.message || "Failed to load Lead Forensics data.");
+  } finally {
+    renderLoading(false);
   }
-})();
+}
+
+// ---------- events ----------
+async function onLogin() {
+  const codeInput = $("#repCodeInput");
+  const raw = codeInput ? codeInput.value : "";
+  const code = safeUpper(raw);
+
+  if (!code || code.length !== 3) return toast("Enter your 3-letter code.");
+
+  const repName = REP_CODES[code];
+  if (!repName) return toast("Unknown rep code.");
+
+  renderLoading(true);
+  try {
+    const assignedTo = await getAssignedToList();
+    const clientUserId = resolveClientUserId(assignedTo, repName);
+
+    if (!clientUserId) {
+      toast("Could not match your name to Lead Forensics 'Assigned To' users.");
+      // Optional: open a picker modal here if you want
+      renderLoading(false);
+      return;
+    }
+
+    state.repCode = code;
+    state.repName = repName;
+    state.clientUserId = String(clientUserId);
+
+    saveSession();
+    renderSignedIn();
+    await refresh();
+  } catch (e) {
+    toast(e.message || "Login failed.");
+  } finally {
+    renderLoading(false);
+  }
+}
+
+function onLogout() {
+  clearSession();
+  renderSignedOut();
+  const wrap = $("#bizList");
+  if (wrap) wrap.innerHTML = "";
+  setText("#kpiCount", "0");
+}
+
+function onRangeChange(days) {
+  state.rangeDays = days;
+  saveSession();
+  setText("#rangeLabel", `${days}d`);
+  refresh().catch(() => {});
+}
+
+// ---------- escaping ----------
+function escapeHtml(s) {
+  return String(s ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+function escapeAttr(s) {
+  return escapeHtml(s).replaceAll("`", "&#096;");
+}
+
+// ---------- boot ----------
+function boot() {
+  // Wire buttons (these IDs should exist in your HTML)
+  $("#btnLogin")?.addEventListener("click", onLogin);
+  $("#repCodeInput")?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") onLogin();
+  });
+
+  $("#btnLogout")?.addEventListener("click", onLogout);
+  $("#btnRefresh")?.addEventListener("click", refresh);
+
+  // Range control (expects buttons like data-days="1|7|30")
+  $$("#rangePills [data-days]").forEach((b) => {
+    b.addEventListener("click", () => {
+      const d = parseInt(b.getAttribute("data-days"), 10);
+      if (Number.isFinite(d)) onRangeChange(d);
+    });
+  });
+
+  // Modal close
+  $("#modalClose")?.addEventListener("click", closeModal);
+  $("#modalOverlay")?.addEventListener("click", (e) => {
+    if (e.target && e.target.id === "modalOverlay") closeModal();
+  });
+
+  // Try session
+  if (loadSession()) {
+    renderSignedIn();
+    refresh().catch(() => {});
+  } else {
+    renderSignedOut();
+  }
+}
+
+document.addEventListener("DOMContentLoaded", boot);
