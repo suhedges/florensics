@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Lead Activity Widget</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <div class="wf-widget" role="application" aria-label="Sales activity widget">
+    <!-- Header -->
+    <header class="wf-header">
+      <div class="wf-brand" title="Assigned web activity">
+        <span class="wf-dot"></span>
+        <span class="wf-title">Web Activity</span>
+      </div>
+
+      <div class="wf-actions">
+        <button class="icon-btn" id="btnRefresh" title="Refresh" aria-label="Refresh">
+          <!-- refresh icon -->
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M17.65 6.35A7.95 7.95 0 0 0 12 4a8 8 0 1 0 7.75 10h-2.1A6 6 0 1 1 12 6c1.3 0 2.5.42 3.47 1.13L13 10h7V3l-2.35 3.35z"/></svg>
+        </button>
+
+        <button class="icon-btn" id="btnSettings" title="Settings" aria-label="Settings">
+          <!-- gear icon -->
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19.14 12.94c.04-.31.06-.63.06-.94s-.02-.63-.06-.94l2.03-1.58a.5.5 0 0 0 .12-.64l-1.92-3.32a.5.5 0 0 0-.6-.22l-2.39.96a7.1 7.1 0 0 0-1.63-.94l-.36-2.54A.5.5 0 0 0 13.9 1h-3.8a.5.5 0 0 0-.49.42l-.36 2.54c-.58.23-1.12.54-1.63.94l-2.39-.96a.5.5 0 0 0-.6.22L2.71 7.48a.5.5 0 0 0 .12.64l2.03 1.58c-.04.31-.06.63-.06.94s.02.63.06.94L2.83 14.52a.5.5 0 0 0-.12.64l1.92 3.32c.13.23.4.32.64.22l2.39-.96c.5.4 1.05.7 1.63.94l.36 2.54c.04.24.25.42.49.42h3.8c.24 0 .45-.18.49-.42l.36-2.54c.58-.23 1.12-.54 1.63-.94l2.39.96c.24.1.51.01.64-.22l1.92-3.32a.5.5 0 0 0-.12-.64l-2.03-1.58zM12 15.5A3.5 3.5 0 1 1 12 8a3.5 3.5 0 0 1 0 7.5z"/></svg>
+        </button>
+      </div>
+    </header>
+
+    <!-- Sign-in / Main -->
+    <main class="wf-main">
+      <!-- Sign-in panel -->
+      <section class="panel" id="signinPanel">
+        <div class="panel-top">
+          <div class="chip">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 12a4 4 0 1 0-4-4 4 4 0 0 0 4 4zm0 2c-3.33 0-8 1.67-8 5v1h16v-1c0-3.33-4.67-5-8-5z"/></svg>
+            <span>Rep sign-in</span>
+          </div>
+        </div>
+
+        <div class="signin">
+          <label class="sr-only" for="repCode">3-letter rep code</label>
+          <input id="repCode" maxlength="3" inputmode="latin" autocomplete="off" spellcheck="false"
+                 placeholder="ABC" aria-label="Enter 3-letter rep code" />
+          <button class="primary-btn" id="btnSignIn" aria-label="Sign in">
+            <span class="btn-text">Go</span>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 17l5-5-5-5v10z"/></svg>
+          </button>
+        </div>
+
+        <div class="hint">
+          Codes are case-insensitive (e.g., <strong>aos</strong> = AOS).
+          <button class="link-btn" id="btnShowCodes">View codes</button>
+        </div>
+      </section>
+
+      <!-- Dashboard panel -->
+      <section class="panel hidden" id="dashPanel">
+        <div class="dash-top">
+          <div class="rep-pill" id="repPill" title="Signed in rep"></div>
+
+          <div class="controls">
+            <div class="select">
+              <select id="rangeSelect" aria-label="Time range">
+                <option value="24h">24h</option>
+                <option value="7d" selected>7d</option>
+                <option value="30d">30d</option>
+              </select>
+              <svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10l5 5 5-5z"/></svg>
+            </div>
+
+            <button class="icon-btn" id="btnSignOut" title="Sign out" aria-label="Sign out">
+              <!-- door icon -->
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 17l1.41-1.41L9.83 14H20v-2H9.83l1.58-1.59L10 9l-5 5 5 5zM4 5h8V3H4c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h8v-2H4V5z"/></svg>
+            </button>
+          </div>
+        </div>
+
+        <!-- Summary tiles -->
+        <div class="tiles">
+          <div class="tile" id="tileNew">
+            <div class="tile-ic">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 12a4 4 0 1 0-4-4 4 4 0 0 0 4 4zm0 2c-3.33 0-8 1.67-8 5v1h10.5a6.5 6.5 0 0 1-.63-2.75c0-.77.13-1.52.38-2.25H12zM18 13v-2h-2v2h-2v2h2v2h2v-2h2v-2h-2z"/></svg>
+            </div>
+            <div class="tile-txt">
+              <div class="tile-val" id="valNew">—</div>
+              <div class="tile-lbl">New</div>
+            </div>
+          </div>
+
+          <div class="tile" id="tileVisits">
+            <div class="tile-ic">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8a4 4 0 1 0 4 4 4 4 0 0 0-4-4zm0-6C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18a8 8 0 1 1 8-8 8 8 0 0 1-8 8z"/></svg>
+            </div>
+            <div class="tile-txt">
+              <div class="tile-val" id="valVisits">—</div>
+              <div class="tile-lbl">Visits</div>
+            </div>
+          </div>
+
+          <div class="tile" id="tileReturning">
+            <div class="tile-ic">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 6V3L8 7l4 4V8c2.76 0 5 2.24 5 5a5 5 0 0 1-8.66 3.54l-1.42 1.42A7 7 0 0 0 19 13c0-3.87-3.13-7-7-7z"/></svg>
+            </div>
+            <div class="tile-txt">
+              <div class="tile-val" id="valReturning">—</div>
+              <div class="tile-lbl">Return</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- List -->
+        <div class="list-head">
+          <div class="list-title">
+            <span>Assigned activity</span>
+          </div>
+          <button class="icon-btn subtle" id="btnFilter" title="Filters" aria-label="Filters">
+            <!-- sliders icon -->
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 18h4v-2h-4v2zM3 6v2h18V6H3zm3 7h12v-2H6v2z"/></svg>
+          </button>
+        </div>
+
+        <div class="list" id="activityList" role="list" aria-label="Activity list"></div>
+
+        <!-- Bottom tiny status -->
+        <div class="status">
+          <div class="dot" id="statusDot"></div>
+          <div class="status-txt" id="statusText">Ready</div>
+        </div>
+      </section>
+    </main>
+
+    <!-- Modal overlay -->
+    <div class="overlay hidden" id="overlay" aria-hidden="true">
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+        <div class="modal-head">
+          <div class="modal-title" id="modalTitle">Details</div>
+          <button class="icon-btn" id="btnCloseModal" title="Close" aria-label="Close">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18.3 5.71L12 12l6.3 6.29-1.41 1.42L10.59 13.4 4.29 19.71 2.88 18.29 9.17 12 2.88 5.71 4.29 4.29 10.59 10.6l6.3-6.31z"/></svg>
+          </button>
+        </div>
+        <div class="modal-body" id="modalBody"></div>
+      </div>
+    </div>
+  </div>
+
+  <script src="./app.js"></script>
+</body>
+</html>
