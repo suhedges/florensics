@@ -1,4 +1,4 @@
-/* app.js — Lead Forensics widget (via Cloudflare Worker proxy)
+/* Lead Forensics widget (via Cloudflare Worker proxy)
    Assumptions:
    - Your Cloudflare Worker forwards requests to https://interact.leadforensics.com
    - Your Worker injects headers:
@@ -9,31 +9,15 @@
 
 const WORKER_BASE = "https://leadforensics-proxy.sethh.workers.dev";
 
-// 360x320 to 360x690 friendly defaults
-const DEFAULT_PAGE_SIZE = 25;
 const DEFAULT_RANGE_DAYS = 7;
 
-// 3-letter rep codes (case-insensitive). Adjust anytime.
-const REP_CODES = {
-  AOS: "Andrew Osborne",
-  APO: "Andy Polson",
-  BDE: "Brad Dedric",
-  BME: "Brian Meredith",
-  CWE: "Chris Westerman",
-  CEL: "Craig Elsner",
-  DRI: "Doug Rigney",
-  ERE: "Eric Reeves",
-  ELI: "Errick Lickey",
-  GDO: "Gavin Douglas",
-  GEL: "Greg Elsner",
-  JPA: "Jason Patterson",
-  JBA: "Jeff Baran",
-  JEL: "Jim Elsner",
-  LCH: "Lydia Chastain",
-  MEL: "Mike Elsner",
-  RRE: "Rick Redelman",
-  RWI: "Robert Wilson",
-  RLO: "Ron Loyd",
+const state = {
+  repCode: null,
+  repName: null,
+  clientUserId: null,
+  rangeDays: DEFAULT_RANGE_DAYS,
+  assignedToCache: null,
+  businesses: [],
 };
 
 // ---------- tiny DOM helpers ----------
@@ -55,12 +39,29 @@ function hide(sel) {
   if (el) el.classList.add("hidden");
 }
 
-function toast(msg) {
-  const el = $("#toast");
-  if (!el) return alert(msg);
-  el.textContent = msg;
-  el.classList.add("show");
-  setTimeout(() => el.classList.remove("show"), 2200);
+function setStatus(message, tone = "") {
+  const dot = $("#statusDot");
+  if (dot) {
+    dot.classList.remove("good", "warn", "bad");
+    if (tone) dot.classList.add(tone);
+  }
+  setText("#statusText", message);
+}
+
+function setLoading(isLoading) {
+  const refreshBtn = $("#btnRefresh");
+  const signInBtn = $("#btnSignIn");
+  const signOutBtn = $("#btnSignOut");
+  if (refreshBtn) refreshBtn.disabled = !!isLoading;
+  if (signInBtn) signInBtn.disabled = !!isLoading;
+  if (signOutBtn) signOutBtn.disabled = !!isLoading;
+  if (isLoading) setStatus("Loading...", "warn");
+}
+
+function notify(message, tone = "warn") {
+  setStatus(message, tone);
+  const signinVisible = !$("#signinPanel")?.classList.contains("hidden");
+  if (signinVisible) alert(message);
 }
 
 // ---------- date helpers ----------
@@ -95,11 +96,37 @@ function rangeFromDays(days) {
   };
 }
 
+function parseLfDate(value) {
+  const str = String(value || "").trim();
+  if (!str) return null;
+  const match = str.match(
+    /(\d{2})[-\/](\d{2})[-\/](\d{4})(?:\s+(\d{2}):(\d{2})(?::(\d{2}))?)?/
+  );
+  if (!match) return null;
+  const day = Number(match[1]);
+  const month = Number(match[2]) - 1;
+  const year = Number(match[3]);
+  const hour = Number(match[4] || 0);
+  const minute = Number(match[5] || 0);
+  const second = Number(match[6] || 0);
+  const dt = new Date(year, month, day, hour, minute, second);
+  return Number.isNaN(dt.getTime()) ? null : dt;
+}
+
+function parseDate(value) {
+  if (!value) return null;
+  if (value instanceof Date) return value;
+  const lf = parseLfDate(value);
+  if (lf) return lf;
+  const parsed = Date.parse(value);
+  if (!Number.isNaN(parsed)) return new Date(parsed);
+  return null;
+}
+
 // ---------- fetch wrapper ----------
 async function lfFetch(path, params = {}) {
   const url = new URL(WORKER_BASE.replace(/\/$/, "") + path);
 
-  // attach params
   Object.entries(params).forEach(([k, v]) => {
     if (v === undefined || v === null || v === "") return;
     url.searchParams.set(k, String(v));
@@ -116,7 +143,6 @@ async function lfFetch(path, params = {}) {
     throw new Error(`LeadForensics proxy error ${res.status}: ${body.slice(0, 200)}`);
   }
 
-  // Some endpoints may return text/json; try json first
   const text = await res.text();
   try {
     return JSON.parse(text);
@@ -128,11 +154,8 @@ async function lfFetch(path, params = {}) {
 // ---------- response normalization ----------
 function asArray(maybeArray) {
   if (Array.isArray(maybeArray)) return maybeArray;
-
-  // Common LF patterns
   if (maybeArray && typeof maybeArray === "object") {
     const keys = Object.keys(maybeArray);
-    // pick first array-like property
     for (const k of keys) {
       if (Array.isArray(maybeArray[k])) return maybeArray[k];
     }
@@ -152,17 +175,19 @@ function safeUpper(s) {
   return String(s || "").trim().toUpperCase();
 }
 
-// ---------- state ----------
-const state = {
-  repCode: null,
-  repName: null,
-  clientUserId: null,
-  rangeDays: DEFAULT_RANGE_DAYS,
-  assignedToCache: null,
-  businesses: [],
-};
+function toNumber(value) {
+  const num = Number(value);
+  return Number.isFinite(num) ? num : 0;
+}
 
-// ---------- Lead Forensics calls ----------
+function getPageSize() {
+  const h = Math.max(document.documentElement.clientHeight || 0, window.innerHeight || 0);
+  if (h >= 600) return 50;
+  if (h >= 420) return 35;
+  return 25;
+}
+
+// ---------- assigned users ----------
 async function getAssignedToList() {
   if (state.assignedToCache) return state.assignedToCache;
   const data = await lfFetch("/WebApi_v2/Reference/GetAssignedToList");
@@ -171,27 +196,48 @@ async function getAssignedToList() {
   return arr;
 }
 
-function resolveClientUserId(assignedToList, repName) {
-  const target = String(repName || "").trim().toLowerCase();
-
-  // Try common fields
-  const found = assignedToList.find((u) => {
-    const name = String(
-      pick(u, ["ClientUserName", "AssignedTo", "Name", "UserName", "FullName"], "")
-    ).toLowerCase();
-    return name === target;
-  });
-
-  return found
-    ? pick(found, ["ClientUserID", "ClientUserId", "AssignedToID", "UserId", "ID"], null)
-    : null;
+function repCodeFromName(name) {
+  const clean = String(name || "")
+    .replace(/[^a-zA-Z\s]/g, " ")
+    .trim();
+  if (!clean) return "";
+  const parts = clean.split(/\s+/).filter(Boolean);
+  if (!parts.length) return "";
+  const first = parts[0][0] || "";
+  const last = parts[parts.length - 1] || "";
+  const lastCode = last.slice(0, 2);
+  return safeUpper(first + lastCode);
 }
 
-async function getBusinessesByAssignedTo(clientuserid, days, pageSize = DEFAULT_PAGE_SIZE, pageNo = 1) {
-  const { datefrom, dateto } = rangeFromDays(days);
+function normalizeAssignedUser(user) {
+  const name = String(
+    pick(user, ["ClientUserName", "AssignedTo", "Name", "UserName", "FullName"], "")
+  ).trim();
+  const id = pick(user, ["ClientUserID", "ClientUserId", "AssignedToID", "UserId", "ID"], "");
+  const code = String(
+    pick(user, ["RepCode", "UserCode", "Code", "Initials", "ShortCode"], "")
+  ).trim();
 
-  // Most LF endpoints use DateFrom/DateTo; some use lowercase.
-  // We'll send lowercase keys; if your Worker normalizes, either works.
+  if (!name || !id) return null;
+  return {
+    name,
+    id: String(id),
+    code: safeUpper(code || repCodeFromName(name)),
+  };
+}
+
+function getAssignedUsers(list) {
+  return list.map(normalizeAssignedUser).filter(Boolean);
+}
+
+function findAssignedUserByCode(users, code) {
+  const target = safeUpper(code);
+  return users.find((u) => safeUpper(u.code) === target) || null;
+}
+
+// ---------- Lead Forensics calls ----------
+async function getBusinessesByAssignedTo(clientuserid, days, pageSize = 25, pageNo = 1) {
+  const { datefrom, dateto } = rangeFromDays(days);
   const data = await lfFetch("/WebApi_v2/Business/GetBusinessesByAssignedTo", {
     clientuserid,
     datefrom,
@@ -200,11 +246,10 @@ async function getBusinessesByAssignedTo(clientuserid, days, pageSize = DEFAULT_
     pageno: pageNo,
   });
 
-  // Try to find list
-  const list =
-    asArray(data) ||
-    asArray(pick(data, ["BusinessList", "Businesses", "Business", "Results"], [])) ||
-    [];
+  const primary = asArray(data);
+  const list = primary.length
+    ? primary
+    : asArray(pick(data, ["BusinessList", "Businesses", "Business", "Results"], [])) || [];
 
   return list;
 }
@@ -213,73 +258,157 @@ async function getBusiness(businessid) {
   return lfFetch("/WebApi_v2/Business/GetBusiness", { businessid });
 }
 
-// Optional (enable if you want a “recent visits” list in the modal)
-async function getVisitsByBusiness(businessid, days = 30, pageSize = 10, pageNo = 1) {
-  const { datefrom, dateto } = rangeFromDays(days);
-  const data = await lfFetch("/WebApi_v2/Visit/GetVisitsByBusiness", {
-    businessid,
-    datefrom,
-    dateto,
-    pagesize: pageSize,
-    pageno: pageNo,
-  });
-  return asArray(data);
-}
-
 // ---------- UI rendering ----------
 function renderSignedOut() {
-  show("#screenLogin");
-  hide("#screenMain");
-  setText("#repBadge", "");
+  show("#signinPanel");
+  hide("#dashPanel");
+  const repPill = $("#repPill");
+  if (repPill) repPill.innerHTML = "";
+  const input = $("#repCode");
+  if (input) input.value = "";
+  const refreshBtn = $("#btnRefresh");
+  if (refreshBtn) refreshBtn.disabled = true;
+  const settingsBtn = $("#btnSettings");
+  if (settingsBtn) settingsBtn.disabled = false;
+  setText("#valNew", "0");
+  setText("#valVisits", "0");
+  setText("#valReturning", "0");
 }
 
 function renderSignedIn() {
-  hide("#screenLogin");
-  show("#screenMain");
-  setText("#repBadge", state.repCode);
-  setText("#repName", state.repName);
-  setText("#rangeLabel", `${state.rangeDays}d`);
+  hide("#signinPanel");
+  show("#dashPanel");
+  renderRepPill();
+  setRangeSelect(state.rangeDays);
+  const refreshBtn = $("#btnRefresh");
+  if (refreshBtn) refreshBtn.disabled = false;
 }
 
-function renderLoading(isLoading) {
-  const btn = $("#btnRefresh");
-  if (btn) btn.disabled = !!isLoading;
-  if (isLoading) show("#loading");
-  else hide("#loading");
+function renderRepPill() {
+  const repPill = $("#repPill");
+  if (!repPill) return;
+  repPill.innerHTML = `
+    <span class="mini">
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M12 12a4 4 0 1 0-4-4 4 4 0 0 0 4 4zm0 2c-3.33 0-8 1.67-8 5v1h16v-1c0-3.33-4.67-5-8-5z"></path>
+      </svg>
+    </span>
+    <span class="rep-name">${escapeHtml(state.repName || "")}</span>
+  `;
 }
 
-function businessCard(b) {
-  const name = pick(b, ["BusinessName", "Name", "CompanyName", "Business"], "Unknown Company");
-  const city = pick(b, ["City", "Town", "LocationCity"], "");
-  const stateProv = pick(b, ["State", "Region", "County", "StateProvince"], "");
-  const country = pick(b, ["Country", "CountryName"], "");
+function setRangeSelect(days) {
+  const select = $("#rangeSelect");
+  if (!select) return;
+  if (days <= 1) select.value = "24h";
+  else if (days <= 7) select.value = "7d";
+  else select.value = "30d";
+}
+
+function getDaysFromRangeValue(value) {
+  if (value === "24h") return 1;
+  if (value === "7d") return 7;
+  if (value === "30d") return 30;
+  return DEFAULT_RANGE_DAYS;
+}
+
+function getVisitCount(business) {
+  return toNumber(pick(business, ["NumberOfVisits", "VisitCount", "Visits", "TotalVisits"], 0));
+}
+
+function getPageCount(business) {
+  return toNumber(pick(business, ["PageViews", "PagesViewed", "TotalPageViews"], 0));
+}
+
+function getLastVisitDate(business) {
+  return parseDate(
+    pick(business, ["LastVisitDate", "MostRecentVisitDate", "LastVisited", "VisitDate"], "")
+  );
+}
+
+function formatShortDate(value) {
+  const dt = parseDate(value);
+  if (!dt) return String(value || "");
+  return dt.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+function isNewBusiness(business, rangeStart) {
+  const flag = pick(
+    business,
+    ["IsNew", "New", "IsNewBusiness", "NewBusiness", "NewVisit", "IsNewVisit"],
+    null
+  );
+  if (flag !== null && flag !== undefined && flag !== "") {
+    if (typeof flag === "string") {
+      const lowered = flag.toLowerCase();
+      return lowered === "true" || lowered === "1" || lowered === "yes";
+    }
+    return !!flag;
+  }
+
+  const firstVisit = parseDate(
+    pick(business, ["FirstVisitDate", "FirstVisited", "DateFirstVisited", "CreatedDate"], "")
+  );
+  if (firstVisit) return firstVisit >= rangeStart;
+
+  const visits = getVisitCount(business);
+  return visits > 0 && visits <= 1;
+}
+
+function updateTiles({ newCount, totalVisits, returningCount }) {
+  setText("#valNew", String(newCount));
+  setText("#valVisits", String(totalVisits));
+  setText("#valReturning", String(returningCount));
+}
+
+function activityRow(business) {
+  const name = pick(business, ["BusinessName", "Name", "CompanyName", "Business"], "Unknown Company");
+  const city = pick(business, ["City", "Town", "LocationCity"], "");
+  const stateProv = pick(business, ["State", "Region", "County", "StateProvince"], "");
+  const country = pick(business, ["Country", "CountryName"], "");
   const loc = [city, stateProv, country].filter(Boolean).join(", ");
 
-  const lastVisit = pick(b, ["LastVisitDate", "MostRecentVisitDate", "LastVisited", "VisitDate"], "");
-  const visits = pick(b, ["NumberOfVisits", "VisitCount", "Visits", "TotalVisits"], "");
-  const pages = pick(b, ["PageViews", "PagesViewed", "TotalPageViews"], "");
+  const lastVisitRaw = pick(
+    business,
+    ["LastVisitDate", "MostRecentVisitDate", "LastVisited", "VisitDate"],
+    ""
+  );
+  const lastVisit = formatShortDate(lastVisitRaw);
+  const visits = getVisitCount(business);
+  const pages = getPageCount(business);
 
-  const id = pick(b, ["BusinessID", "BusinessId", "ID", "Id"], null);
+  const metaParts = [];
+  if (visits) metaParts.push(`${visits} visit${visits === 1 ? "" : "s"}`);
+  if (pages) metaParts.push(`${pages} page${pages === 1 ? "" : "s"}`);
+  const meta = metaParts.join(" | ");
+
+  const summaryParts = [];
+  if (loc) summaryParts.push(loc);
+  if (lastVisit) summaryParts.push(lastVisit);
+  const summary = summaryParts.join(" | ");
+
+  const id = pick(business, ["BusinessID", "BusinessId", "ID", "Id"], "");
 
   return `
-    <button class="bizCard" data-bizid="${id ?? ""}">
-      <div class="bizTop">
-        <div class="bizName" title="${escapeHtml(name)}">${escapeHtml(name)}</div>
-        <div class="bizPills">
-          ${visits !== "" ? `<span class="pill" title="Visits">${escapeHtml(String(visits))}V</span>` : ""}
-          ${pages !== "" ? `<span class="pill" title="Pages">${escapeHtml(String(pages))}P</span>` : ""}
-        </div>
+    <button class="row" type="button" data-bizid="${escapeAttr(String(id || ""))}">
+      <div class="badge">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M3 21h18v-2H3v2zm2-4h14V3H5v14zm2-2V5h10v10H7z"></path>
+        </svg>
       </div>
-      <div class="bizMeta">
-        ${loc ? `<span class="muted" title="Location">${escapeHtml(loc)}</span>` : `<span class="muted"> </span>`}
-        ${lastVisit ? `<span class="muted" title="Last activity">${escapeHtml(String(lastVisit))}</span>` : `<span class="muted"> </span>`}
+      <div class="row-main">
+        <div class="row-top">
+          <div class="company" title="${escapeAttr(name)}">${escapeHtml(name)}</div>
+          <div class="meta">${escapeHtml(meta)}</div>
+        </div>
+        <div class="row-bot">${escapeHtml(summary)}</div>
       </div>
     </button>
   `;
 }
 
-function renderBusinesses(list) {
-  const wrap = $("#bizList");
+function renderActivityList(list) {
+  const wrap = $("#activityList");
   if (!wrap) return;
 
   if (!list.length) {
@@ -287,40 +416,56 @@ function renderBusinesses(list) {
     return;
   }
 
-  // Sort by “last visit” if possible
   const sorted = [...list].sort((a, b) => {
-    const av = Date.parse(pick(a, ["LastVisitDate", "MostRecentVisitDate", "VisitDate"], "")) || 0;
-    const bv = Date.parse(pick(b, ["LastVisitDate", "MostRecentVisitDate", "VisitDate"], "")) || 0;
+    const av = getLastVisitDate(a)?.getTime() || 0;
+    const bv = getLastVisitDate(b)?.getTime() || 0;
     return bv - av;
   });
 
-  wrap.innerHTML = sorted.map(businessCard).join("");
-
-  // click handler
-  $$("#bizList .bizCard").forEach((btn) => {
-    btn.addEventListener("click", async () => {
-      const bizId = btn.getAttribute("data-bizid");
-      if (!bizId) return toast("No business ID found for this item.");
-      await openBusinessModal(bizId);
-    });
-  });
+  wrap.innerHTML = sorted.map(activityRow).join("");
 }
 
 // ---------- modal ----------
-async function openBusinessModal(businessid) {
-  show("#modalOverlay");
-  setText("#modalTitle", "Loading…");
-  setText("#modalSubtitle", "");
+function openModal(title, bodyHtml) {
+  setText("#modalTitle", title);
   const body = $("#modalBody");
-  if (body) body.innerHTML = `<div class="modalLoading">Fetching company details…</div>`;
+  if (body) body.innerHTML = bodyHtml;
+  show("#overlay");
+  const overlay = $("#overlay");
+  if (overlay) overlay.setAttribute("aria-hidden", "false");
+}
+
+function closeModal() {
+  hide("#overlay");
+  const overlay = $("#overlay");
+  if (overlay) overlay.setAttribute("aria-hidden", "true");
+}
+
+function kvRow(label, valueHtml) {
+  return `
+    <div class="k">${escapeHtml(label)}</div>
+    <div class="v">${valueHtml}</div>
+  `;
+}
+
+function linkHtml(url) {
+  const safe = String(url || "").trim();
+  if (!safe) return "";
+  const href = safe.startsWith("http") ? safe : `https://${safe}`;
+  return `<a class="link" href="${escapeAttr(href)}" target="_blank" rel="noopener">Open</a>`;
+}
+
+async function openBusinessModal(businessid) {
+  openModal("Loading...", `<div class="empty">Fetching company details...</div>`);
 
   try {
     const details = await getBusiness(businessid);
-
     const name = pick(details, ["BusinessName", "Name", "CompanyName"], "Company");
     const website = pick(details, ["Website", "WebSite", "Url", "URL"], "");
     const phone = pick(details, ["Phone", "Telephone", "PhoneNumber"], "");
     const industry = pick(details, ["Industry", "IndustryName"], "");
+    const lastVisit = pick(details, ["LastVisitDate", "MostRecentVisitDate", "VisitDate"], "");
+    const employees = pick(details, ["EmployeeCount", "Employees", "NumberOfEmployees"], "");
     const address = [
       pick(details, ["Address1", "AddressLine1"], ""),
       pick(details, ["Address2", "AddressLine2"], ""),
@@ -333,72 +478,32 @@ async function openBusinessModal(businessid) {
       .join(", ");
 
     setText("#modalTitle", name);
-    setText("#modalSubtitle", industry ? String(industry) : "");
 
-    let html = `
-      <div class="detailGrid">
-        ${website ? detailRow("Website", linkHtml(website)) : ""}
-        ${phone ? detailRow("Phone", escapeHtml(phone)) : ""}
-        ${address ? detailRow("Address", escapeHtml(address)) : ""}
-      </div>
-    `;
+    const rows = [];
+    if (industry) rows.push(kvRow("Industry", escapeHtml(industry)));
+    if (website) rows.push(kvRow("Website", linkHtml(website)));
+    if (phone) rows.push(kvRow("Phone", escapeHtml(phone)));
+    if (employees) rows.push(kvRow("Employees", escapeHtml(String(employees))));
+    if (address) rows.push(kvRow("Address", escapeHtml(address)));
+    if (lastVisit) rows.push(kvRow("Last visit", escapeHtml(String(lastVisit))));
 
-    // OPTIONAL: recent visits
-    // NOTE: This can increase API calls; keep pageSize low.
-    try {
-      const visits = await getVisitsByBusiness(businessid, 30, 6, 1);
-      if (visits.length) {
-        const rows = visits
-          .slice(0, 6)
-          .map((v) => {
-            const dt = pick(v, ["VisitDate", "Date", "StartDate"], "");
-            const pages = pick(v, ["PageViews", "Pages", "PagesViewed"], "");
-            const ref = pick(v, ["Referrer", "ReferringSite", "ReferringURL"], "");
-            return `
-              <div class="visitRow">
-                <div class="visitDt">${escapeHtml(String(dt || ""))}</div>
-                <div class="visitMeta">
-                  ${pages !== "" ? `<span class="pill">${escapeHtml(String(pages))}P</span>` : ""}
-                  ${ref ? `<span class="muted clamp" title="${escapeHtml(ref)}">${escapeHtml(ref)}</span>` : ""}
-                </div>
-              </div>
-            `;
-          })
-          .join("");
+    const visits = getVisitCount(details);
+    const pages = getPageCount(details);
+    const pills = [];
+    if (visits) pills.push(`<span class="pill">${escapeHtml(String(visits))}V</span>`);
+    if (pages) pills.push(`<span class="pill">${escapeHtml(String(pages))}P</span>`);
 
-        html += `
-          <div class="section">
-            <div class="sectionTitle">Recent visits (30d)</div>
-            <div class="visitList">${rows}</div>
-          </div>
-        `;
-      }
-    } catch {
-      // ignore if endpoint not enabled in your tenant
-    }
+    const bodyHtml = rows.length
+      ? `<div class="kv">${rows.join("")}</div>${pills.length ? `<div class="pills">${pills.join("")}</div>` : ""}`
+      : `<div class="empty">No details available.</div>`;
 
-    if (body) body.innerHTML = html;
+    const body = $("#modalBody");
+    if (body) body.innerHTML = bodyHtml;
   } catch (e) {
-    if (body) body.innerHTML = `<div class="empty">Could not load details. ${escapeHtml(e.message)}</div>`;
+    setText("#modalTitle", "Details");
+    const body = $("#modalBody");
+    if (body) body.innerHTML = `<div class="empty">Could not load details.</div>`;
   }
-}
-
-function closeModal() {
-  hide("#modalOverlay");
-}
-
-function detailRow(label, valueHtml) {
-  return `
-    <div class="detailRow">
-      <div class="detailLabel">${escapeHtml(label)}</div>
-      <div class="detailValue">${valueHtml}</div>
-    </div>
-  `;
-}
-
-function linkHtml(url) {
-  const safe = String(url).startsWith("http") ? url : `https://${url}`;
-  return `<a class="link" href="${escapeAttr(safe)}" target="_blank" rel="noopener">Open</a>`;
 }
 
 // ---------- auth / sign-in ----------
@@ -440,113 +545,182 @@ function clearSession() {
 async function refresh() {
   if (!state.clientUserId) return;
 
-  renderLoading(true);
+  setLoading(true);
   try {
-    const businesses = await getBusinessesByAssignedTo(state.clientUserId, state.rangeDays, DEFAULT_PAGE_SIZE, 1);
+    const pageSize = getPageSize();
+    const businesses = await getBusinessesByAssignedTo(
+      state.clientUserId,
+      state.rangeDays,
+      pageSize,
+      1
+    );
     state.businesses = businesses;
 
-    renderBusinesses(businesses);
+    const rangeStart = new Date();
+    rangeStart.setDate(rangeStart.getDate() - state.rangeDays);
+    rangeStart.setHours(0, 0, 0, 0);
 
-    setText("#kpiCount", businesses.length ? String(businesses.length) : "0");
+    const summary = businesses.reduce(
+      (acc, business) => {
+        const visits = getVisitCount(business);
+        acc.totalVisits += visits;
+        if (visits > 1) acc.returningCount += 1;
+        if (isNewBusiness(business, rangeStart)) acc.newCount += 1;
+        return acc;
+      },
+      { newCount: 0, totalVisits: 0, returningCount: 0 }
+    );
+
+    updateTiles(summary);
+    renderActivityList(businesses);
+    if (businesses.length) setStatus("Updated just now", "good");
+    else setStatus("No activity in range", "warn");
   } catch (e) {
-    toast(e.message || "Failed to load Lead Forensics data.");
+    console.error(e);
+    setStatus("Failed to load data", "bad");
+    notify(e.message || "Failed to load Lead Forensics data.", "bad");
   } finally {
-    renderLoading(false);
+    setLoading(false);
   }
 }
 
 // ---------- events ----------
-async function onLogin() {
-  const codeInput = $("#repCodeInput");
+async function onSignIn() {
+  const codeInput = $("#repCode");
   const raw = codeInput ? codeInput.value : "";
   const code = safeUpper(raw);
 
-  if (!code || code.length !== 3) return toast("Enter your 3-letter code.");
+  if (!code || code.length !== 3) return notify("Enter your 3-letter rep code.");
 
-  const repName = REP_CODES[code];
-  if (!repName) return toast("Unknown rep code.");
-
-  renderLoading(true);
+  setLoading(true);
   try {
     const assignedTo = await getAssignedToList();
-    const clientUserId = resolveClientUserId(assignedTo, repName);
+    const users = getAssignedUsers(assignedTo);
+    const match = findAssignedUserByCode(users, code);
 
-    if (!clientUserId) {
-      toast("Could not match your name to Lead Forensics 'Assigned To' users.");
-      // Optional: open a picker modal here if you want
-      renderLoading(false);
+    if (!match) {
+      notify("No matching rep found. Use View codes to confirm your code.");
       return;
     }
 
-    state.repCode = code;
-    state.repName = repName;
-    state.clientUserId = String(clientUserId);
+    state.repCode = match.code;
+    state.repName = match.name;
+    state.clientUserId = match.id;
 
     saveSession();
     renderSignedIn();
     await refresh();
   } catch (e) {
-    toast(e.message || "Login failed.");
+    console.error(e);
+    notify(e.message || "Sign-in failed.", "bad");
   } finally {
-    renderLoading(false);
+    setLoading(false);
   }
 }
 
-function onLogout() {
+function onSignOut() {
   clearSession();
   renderSignedOut();
-  const wrap = $("#bizList");
+  const wrap = $("#activityList");
   if (wrap) wrap.innerHTML = "";
-  setText("#kpiCount", "0");
+  setStatus("Ready", "good");
 }
 
-function onRangeChange(days) {
+function onRangeChange() {
+  const select = $("#rangeSelect");
+  if (!select) return;
+  const days = getDaysFromRangeValue(select.value);
   state.rangeDays = days;
   saveSession();
-  setText("#rangeLabel", `${days}d`);
   refresh().catch(() => {});
+}
+
+async function showCodesModal() {
+  setLoading(true);
+  try {
+    const assignedTo = await getAssignedToList();
+    const users = getAssignedUsers(assignedTo).sort((a, b) =>
+      a.name.localeCompare(b.name)
+    );
+    const rows = users
+      .map(
+        (u) => `
+        <div class="code-row">
+          <span class="code">${escapeHtml(u.code || "")}</span>
+          <span class="code-name">${escapeHtml(u.name)}</span>
+        </div>
+      `
+      )
+      .join("");
+
+    const body = users.length
+      ? `<div class="code-list">${rows}</div>`
+      : `<div class="empty">No assigned users returned.</div>`;
+    openModal("Rep codes", body);
+  } catch (e) {
+    console.error(e);
+    notify("Could not load rep codes.", "bad");
+  } finally {
+    setLoading(false);
+  }
+}
+
+function showAccountModal() {
+  if (!state.repName || !state.repCode) return showCodesModal();
+  const body = `
+    <div class="kv">
+      ${kvRow("Rep", escapeHtml(state.repName))}
+      ${kvRow("Code", escapeHtml(state.repCode))}
+      ${kvRow("Range", escapeHtml(String(state.rangeDays)) + "d")}
+    </div>
+  `;
+  openModal("Account", body);
+}
+
+function focusRangeSelect() {
+  const select = $("#rangeSelect");
+  if (select) select.focus();
 }
 
 // ---------- escaping ----------
 function escapeHtml(s) {
   return String(s ?? "")
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/\"/g, "&quot;")
+    .replace(/'/g, "&#039;");
 }
 
 function escapeAttr(s) {
-  return escapeHtml(s).replaceAll("`", "&#096;");
+  return escapeHtml(s).replace(/`/g, "&#096;");
 }
 
 // ---------- boot ----------
 function boot() {
-  // Wire buttons (these IDs should exist in your HTML)
-  $("#btnLogin")?.addEventListener("click", onLogin);
-  $("#repCodeInput")?.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") onLogin();
+  $("#btnSignIn")?.addEventListener("click", onSignIn);
+  $("#repCode")?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") onSignIn();
   });
-
-  $("#btnLogout")?.addEventListener("click", onLogout);
+  $("#btnSignOut")?.addEventListener("click", onSignOut);
   $("#btnRefresh")?.addEventListener("click", refresh);
-
-  // Range control (expects buttons like data-days="1|7|30")
-  $$("#rangePills [data-days]").forEach((b) => {
-    b.addEventListener("click", () => {
-      const d = parseInt(b.getAttribute("data-days"), 10);
-      if (Number.isFinite(d)) onRangeChange(d);
-    });
+  $("#rangeSelect")?.addEventListener("change", onRangeChange);
+  $("#btnShowCodes")?.addEventListener("click", showCodesModal);
+  $("#btnSettings")?.addEventListener("click", showAccountModal);
+  $("#btnFilter")?.addEventListener("click", focusRangeSelect);
+  $("#btnCloseModal")?.addEventListener("click", closeModal);
+  $("#overlay")?.addEventListener("click", (e) => {
+    if (e.target && e.target.id === "overlay") closeModal();
   });
 
-  // Modal close
-  $("#modalClose")?.addEventListener("click", closeModal);
-  $("#modalOverlay")?.addEventListener("click", (e) => {
-    if (e.target && e.target.id === "modalOverlay") closeModal();
+  $("#activityList")?.addEventListener("click", (e) => {
+    const row = e.target.closest(".row");
+    if (!row) return;
+    const bizId = row.getAttribute("data-bizid");
+    if (!bizId) return;
+    openBusinessModal(bizId);
   });
 
-  // Try session
   if (loadSession()) {
     renderSignedIn();
     refresh().catch(() => {});
