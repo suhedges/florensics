@@ -195,9 +195,12 @@ function getPageSize() {
 }
 
 // ---------- assigned users ----------
-async function getAssignedToList() {
+async function getAssignedToList(pageSize = 200, pageNo = 1) {
   if (state.assignedToCache) return state.assignedToCache;
-  const data = await lfFetch("/WebApi_v2/Reference/GetAssignedToList");
+  const data = await lfFetch("/WebApi_v2/Reference/GetAssignedToList", {
+    pagesize: pageSize,
+    pageno: pageNo,
+  });
   const arr = asArray(data);
   state.assignedToCache = arr;
   return arr;
