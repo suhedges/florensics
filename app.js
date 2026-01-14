@@ -140,7 +140,14 @@ async function lfFetch(path, params = {}) {
 
   if (!res.ok) {
     const body = await res.text().catch(() => "");
-    throw new Error(`LeadForensics proxy error ${res.status}: ${body.slice(0, 200)}`);
+    const upstreamUrl = res.headers.get("X-Upstream-Url");
+    const upstreamStatus = res.headers.get("X-Upstream-Status");
+    const extra = upstreamUrl
+      ? ` (upstream ${upstreamStatus || res.status}: ${upstreamUrl})`
+      : "";
+    throw new Error(
+      `LeadForensics proxy error ${res.status}${extra}: ${body.slice(0, 200)}`
+    );
   }
 
   const text = await res.text();
