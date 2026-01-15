@@ -18,8 +18,9 @@ const PAGE_PAGE_SIZE = 10;
 const ALL_VISITS_PAGE_SIZE = 200;
 const MAX_ALL_VISIT_PAGES = 30;
 const MAX_ACTIVITY_COMPANIES = 60;
-const VISIT_SUMMARY_PAGE_SIZE = 1;
+const VISIT_SUMMARY_PAGE_SIZE = 10;
 const DETAILS_BATCH_SIZE = 6;
+const REPORT_COMPANY_LIMIT = 120;
 const TOP_COMPANY_RANGE_DAYS = 365;
 const DEFAULT_HIDE_GENERIC = true;
 
@@ -30,6 +31,8 @@ const state = {
   rangeDays: DEFAULT_RANGE_DAYS,
   assignedToCache: null,
   businesses: [],
+  reportBusinesses: [],
+  activityMeta: null,
   mode: "signed_out",
   assignedSource: "assigned",
   pagesCache: {},
@@ -40,6 +43,7 @@ const state = {
   ipUnlocked: false,
   activeBusinessId: null,
   longRangeTopCompanies: null,
+  isLoading: false,
   activeTile: "visits",
   rangeStart: null,
   activeTab: "activity",
@@ -94,16 +98,21 @@ function setSignOutLabel(mode) {
 }
 
 function setLoading(isLoading) {
+  state.isLoading = !!isLoading;
   const refreshBtn = $("#btnRefresh");
   const signInBtn = $("#btnSignIn");
   const signOutBtn = $("#btnSignOut");
   const exploreBtn = $("#btnExplore");
   const rangeSelect = $("#rangeSelect");
+  const activityList = $("#activityList");
+  const reportsGrid = $("#reportsGrid");
   if (refreshBtn) refreshBtn.disabled = !!isLoading;
   if (signInBtn) signInBtn.disabled = !!isLoading;
   if (signOutBtn) signOutBtn.disabled = !!isLoading;
   if (exploreBtn) exploreBtn.disabled = !!isLoading;
   if (rangeSelect) rangeSelect.disabled = !!isLoading;
+  if (activityList) activityList.setAttribute("aria-busy", isLoading ? "true" : "false");
+  if (reportsGrid) reportsGrid.setAttribute("aria-busy", isLoading ? "true" : "false");
   if (isLoading) setStatus("Loading...", "warn");
 }
 
@@ -738,17 +747,30 @@ function updateListCount(visibleCount, totalCount) {
       : `${visibleCount} of ${totalCount}`;
 }
 
-function updateReportsNote() {
+function updateReportsNote(reportCount) {
   const note = $("#reportsNote");
   if (!note) return;
-  note.textContent = filtersActive() ? "Filtered results" : "All results";
+  const label = filtersActive() ? "Filtered results" : "All results";
+  if (state.mode === "all" && state.activityMeta) {
+    const total = state.activityMeta.totalBusinesses || 0;
+    const used = reportCount || state.activityMeta.reportCount || 0;
+    const sampled = (total && used && used < total) || state.activityMeta.capped;
+    if (sampled) {
+      const rangeNote =
+        total && used ? `Top ${used} of ${total}` : "Sampled results";
+      const suffix = state.activityMeta.capped ? " (sample)" : "";
+      note.textContent = `${label} | ${rangeNote}${suffix}`;
+      return;
+    }
+  }
+  note.textContent = label;
 }
 
 function updateActivityView() {
   const filtered = sortBusinesses(getFilteredBusinesses(state.businesses));
   renderActivityList(filtered);
   updateListCount(filtered.length, state.businesses.length);
-  renderReports(filtered);
+  renderReports(filtered, state.reportBusinesses);
   updateFilterSummary();
   updateSortToggleLabel();
 }
@@ -784,6 +806,7 @@ function updateFilterSummary() {
   }
   if (state.filters.hideGeneric) bits.push("Hide generic");
   if (state.filters.query) bits.push(`Search: ${state.filters.query}`);
+  bits.push(`Sort: ${sortLabel()}`);
   el.textContent = bits.join(" | ");
 }
 
@@ -1017,6 +1040,60 @@ function updateTiles({ newCount, totalVisits, returningCount }) {
   setText("#valNew", String(newCount));
   setText("#valVisits", String(totalVisits));
   setText("#valReturning", String(returningCount));
+}
+
+function renderActivityLoading() {
+  const wrap = $("#activityList");
+  if (!wrap) return;
+  const rows = Array.from({ length: 6 })
+    .map(
+      () => `
+      <div class="row skeleton-row" role="listitem">
+        <div class="skel box" style="width:26px; height:26px;"></div>
+        <div class="row-main">
+          <div class="row-top">
+            <span class="skel line" style="width:45%;"></span>
+            <span class="skel line" style="width:20%;"></span>
+          </div>
+          <div class="row-bot">
+            <span class="skel line" style="width:60%;"></span>
+          </div>
+          <div class="row-details">
+            <span class="skel chip" style="width:70px;"></span>
+            <span class="skel chip" style="width:90px;"></span>
+            <span class="skel chip" style="width:60px;"></span>
+          </div>
+        </div>
+      </div>
+    `
+    )
+    .join("");
+  wrap.innerHTML = rows;
+}
+
+function renderReportsLoading() {
+  const grid = $("#reportsGrid");
+  if (!grid) return;
+  const cards = Array.from({ length: 3 })
+    .map(
+      () => `
+      <div class="report-card skeleton-card">
+        <div class="skel line" style="width:50%; height:10px;"></div>
+        <div class="skel line" style="width:70%; height:8px; margin-top:6px;"></div>
+        <div class="skel bar" style="width:100%; height:6px; margin-top:10px;"></div>
+        <div class="skel bar" style="width:90%; height:6px; margin-top:6px;"></div>
+        <div class="skel bar" style="width:80%; height:6px; margin-top:6px;"></div>
+      </div>
+    `
+    )
+    .join("");
+  grid.innerHTML = cards;
+}
+
+function renderLoadingState() {
+  if (state.mode === "signed_out") return;
+  renderActivityLoading();
+  renderReportsLoading();
 }
 
 function activityRow(business) {
@@ -1550,11 +1627,16 @@ async function getVisitSummary(businessid, days) {
     1
   );
   const { visits, recordCount } = extractVisitList(data);
+  const pagesSample = visits.reduce((sum, visit) => sum + getVisitPages(visit), 0);
+  let pages = pagesSample;
+  if (recordCount > visits.length && visits.length > 0) {
+    pages = Math.round((pagesSample / visits.length) * recordCount);
+  }
   const latest = visits[0] ? getVisitStartDate(visits[0]) || getVisitEndDate(visits[0]) : null;
   const summary = {
     businessid: String(businessid),
     visits: recordCount,
-    pages: 0,
+    pages,
     lastVisit: latest,
   };
   if (!state.visitStatsCache) state.visitStatsCache = {};
@@ -1618,12 +1700,16 @@ async function buildAllActivityBusinesses(days, options = {}) {
 
   const statsList = Array.from(statsMap.values()).sort((a, b) => b.visits - a.visits);
   const defaultLimit = Math.min(MAX_ACTIVITY_COMPANIES, Math.max(getPageSize(), 25));
-  const limit = Math.min(options.limit || defaultLimit, statsList.length);
-  const topStats = statsList.slice(0, limit);
-  const ids = topStats.map((stat) => String(stat.businessid));
+  const listLimit = Math.min(options.limit || defaultLimit, statsList.length);
+  const baseReportLimit = options.reportLimit
+    ? Math.max(options.reportLimit, listLimit)
+    : Math.max(listLimit, REPORT_COMPANY_LIMIT);
+  const reportLimit = Math.min(baseReportLimit, statsList.length);
+  const reportStats = statsList.slice(0, reportLimit);
+  const ids = reportStats.map((stat) => String(stat.businessid));
   const detailsMap = await getBusinessesByIds(ids);
 
-  const businesses = topStats.map((stat) => {
+  const reportBusinesses = reportStats.map((stat) => {
     const detail =
       detailsMap.get(String(stat.businessid)) || {
         BusinessID: stat.businessid,
@@ -1631,6 +1717,7 @@ async function buildAllActivityBusinesses(days, options = {}) {
       };
     return applyVisitStats(detail, stat);
   });
+  const businesses = reportBusinesses.slice(0, listLimit);
 
   const summary = statsList.reduce(
     (acc, stat) => {
@@ -1644,6 +1731,7 @@ async function buildAllActivityBusinesses(days, options = {}) {
 
   return {
     businesses,
+    reportBusinesses,
     capped: totalPages > MAX_ALL_VISIT_PAGES,
     totalBusinesses: statsList.length,
     summary,
@@ -1788,12 +1876,15 @@ function renderListCard(title, subtitle, items) {
   `;
 }
 
-function renderReports(list) {
+function renderReports(list, reportSource) {
   const grid = $("#reportsGrid");
   if (!grid) return;
-  updateReportsNote();
+  const source =
+    reportSource && reportSource.length ? reportSource : list;
+  const filtered = getFilteredBusinesses(source);
+  updateReportsNote(source.length);
 
-  if (!list.length) {
+  if (!filtered.length) {
     const msg = filtersActive() ? "No data for current filters." : "No data for this range.";
     grid.innerHTML = `<div class="report-empty">${msg}</div>`;
     return;
@@ -1814,18 +1905,18 @@ function renderReports(list) {
       ? []
       : longRange
       ? longRange.list
-      : buildTopCompanies(list, 5);
+      : buildTopCompanies(filtered, 5);
   const locations = buildTopGroups(
-    list,
+    filtered,
     (business) => pick(business, ["Country", "CountryName"], "Unknown"),
     5
   );
   const industries = buildTopGroups(
-    list,
+    filtered,
     (business) => pick(business, ["Industry", "IndustryName"], "Unknown"),
     5
   );
-  const recent = buildRecentList(list, 5);
+  const recent = buildRecentList(filtered, 5);
   const hasIndustry = industries.some(
     (item) => String(item.label || "").toLowerCase() !== "unknown"
   );
@@ -1865,6 +1956,7 @@ async function loadLongRangeTopCompanies() {
   try {
     const result = await buildAllActivityBusinesses(TOP_COMPANY_RANGE_DAYS, {
       limit: 8,
+      reportLimit: 8,
       maxPages: MAX_ALL_VISIT_PAGES,
       allowLongRange: true,
     });
@@ -1881,7 +1973,7 @@ async function loadLongRangeTopCompanies() {
   }
 
   const filtered = sortBusinesses(getFilteredBusinesses(state.businesses));
-  renderReports(filtered);
+  renderReports(filtered, state.reportBusinesses);
 }
 
 async function togglePagesForBusiness(businessid) {
@@ -2208,6 +2300,8 @@ function clearSession() {
   state.repName = null;
   state.clientUserId = null;
   state.businesses = [];
+  state.reportBusinesses = [];
+  state.activityMeta = null;
   state.pagesCache = {};
   state.visitsCache = {};
   state.visitStatsCache = {};
@@ -2225,6 +2319,7 @@ async function refresh() {
 
   state.rangeDays = clampRangeDays(state.rangeDays);
   setLoading(true);
+  renderLoadingState();
   try {
     let businesses = [];
     let summary = { newCount: 0, totalVisits: 0, returningCount: 0 };
@@ -2234,6 +2329,12 @@ async function refresh() {
       businesses = result.businesses;
       capped = result.capped;
       summary = result.summary;
+      state.reportBusinesses = result.reportBusinesses || result.businesses;
+      state.activityMeta = {
+        totalBusinesses: result.totalBusinesses,
+        capped: result.capped,
+        reportCount: state.reportBusinesses.length,
+      };
     } else {
       const pageSize = getPageSize();
       const assigned = await getBusinessesByAssignedTo(
@@ -2243,6 +2344,8 @@ async function refresh() {
         1
       );
       businesses = await hydrateBusinessesWithVisitStats(assigned, state.rangeDays);
+      state.reportBusinesses = businesses;
+      state.activityMeta = null;
     }
     state.businesses = businesses;
 
@@ -2334,6 +2437,8 @@ function onSignOut() {
     state.ipUnlocked = false;
     state.longRangeTopCompanies = null;
     state.businesses = [];
+    state.reportBusinesses = [];
+    state.activityMeta = null;
     const wrap = $("#activityList");
     if (wrap) wrap.innerHTML = "";
     const grid = $("#reportsGrid");
@@ -2352,6 +2457,8 @@ function onSignOut() {
   state.ipUnlocked = false;
   state.longRangeTopCompanies = null;
   state.businesses = [];
+  state.reportBusinesses = [];
+  state.activityMeta = null;
   renderSignedOut();
   const wrap = $("#activityList");
   if (wrap) wrap.innerHTML = "";
@@ -2384,6 +2491,8 @@ async function onExplore() {
     state.repCode = null;
     state.repName = null;
     state.businesses = [];
+    state.reportBusinesses = [];
+    state.activityMeta = null;
     state.pagesCache = {};
     state.visitsCache = {};
     state.visitStatsCache = {};

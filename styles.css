@@ -452,6 +452,27 @@ select{
 }
 .row:hover{background: rgba(15,23,42,.08);}
 .row + .row{margin-top:4px;}
+.skeleton-row{cursor:default;}
+.skeleton-row:hover{background: transparent;}
+.skel{
+  position:relative;
+  display:inline-block;
+  overflow:hidden;
+  background: rgba(15,23,42,.12);
+}
+.skel::after{
+  content:"";
+  position:absolute;
+  inset:0;
+  transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,.7), transparent);
+  animation: shimmer 1.2s infinite;
+}
+.skel.line{border-radius:999px;}
+.skel.chip{border-radius:999px; height:14px;}
+.skel.box{border-radius:10px;}
+.skel.bar{border-radius:999px;}
+.skeleton-card{overflow:hidden;}
 .badge{
   width:26px; height:26px;
   border-radius:10px;
@@ -981,6 +1002,9 @@ select{
 
 @keyframes barGrow{
   to{width: var(--pct, 0%);}
+}
+@keyframes shimmer{
+  100%{transform: translateX(100%);}
 }
 
 /* scrollbars (subtle) */
