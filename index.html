@@ -10,12 +10,20 @@
   <div class="wf-widget" role="application" aria-label="Sales activity widget">
     <!-- Header -->
     <header class="wf-header">
-      <div class="wf-brand" title="Assigned web activity">
-        <span class="wf-dot"></span>
-        <span class="wf-title">Lead Forensics</span>
+      <div class="wf-header-left">
+        <div class="rep-pill" id="repPill" title="Signed in rep"></div>
       </div>
 
-      <div class="wf-actions">
+      <div class="wf-header-right">
+        <div class="select header-select">
+          <select id="rangeSelect" aria-label="Time range">
+            <option value="24h">24h</option>
+            <option value="7d" selected>7d</option>
+            <option value="30d">30d</option>
+          </select>
+          <svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10l5 5 5-5z"/></svg>
+        </div>
+
         <button class="icon-btn" id="btnRefresh" title="Refresh" aria-label="Refresh">
           <!-- refresh icon -->
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M17.65 6.35A7.95 7.95 0 0 0 12 4a8 8 0 1 0 7.75 10h-2.1A6 6 0 1 1 12 6c1.3 0 2.5.42 3.47 1.13L13 10h7V3l-2.35 3.35z"/></svg>
@@ -24,6 +32,11 @@
         <button class="icon-btn" id="btnSettings" title="Settings" aria-label="Settings">
           <!-- gear icon -->
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19.14 12.94c.04-.31.06-.63.06-.94s-.02-.63-.06-.94l2.03-1.58a.5.5 0 0 0 .12-.64l-1.92-3.32a.5.5 0 0 0-.6-.22l-2.39.96a7.1 7.1 0 0 0-1.63-.94l-.36-2.54A.5.5 0 0 0 13.9 1h-3.8a.5.5 0 0 0-.49.42l-.36 2.54c-.58.23-1.12.54-1.63.94l-2.39-.96a.5.5 0 0 0-.6.22L2.71 7.48a.5.5 0 0 0 .12.64l2.03 1.58c-.04.31-.06.63-.06.94s.02.63.06.94L2.83 14.52a.5.5 0 0 0-.12.64l1.92 3.32c.13.23.4.32.64.22l2.39-.96c.5.4 1.05.7 1.63.94l.36 2.54c.04.24.25.42.49.42h3.8c.24 0 .45-.18.49-.42l.36-2.54c.58-.23 1.12-.54 1.63-.94l2.39.96c.24.1.51.01.64-.22l1.92-3.32a.5.5 0 0 0-.12-.64l-2.03-1.58zM12 15.5A3.5 3.5 0 1 1 12 8a3.5 3.5 0 0 1 0 7.5z"/></svg>
+        </button>
+
+        <button class="icon-btn" id="btnSignOut" title="Sign out" aria-label="Sign out">
+          <!-- door icon -->
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 17l1.41-1.41L9.83 14H20v-2H9.83l1.58-1.59L10 9l-5 5 5 5zM4 5h8V3H4c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h8v-2H4V5z"/></svg>
         </button>
       </div>
     </header>
@@ -56,26 +69,6 @@
 
       <!-- Dashboard panel -->
       <section class="panel hidden" id="dashPanel">
-        <div class="dash-top">
-          <div class="rep-pill" id="repPill" title="Signed in rep"></div>
-
-          <div class="controls">
-            <div class="select">
-              <select id="rangeSelect" aria-label="Time range">
-                <option value="24h">24h</option>
-                <option value="7d" selected>7d</option>
-                <option value="30d">30d</option>
-              </select>
-              <svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10l5 5 5-5z"/></svg>
-            </div>
-
-            <button class="icon-btn" id="btnSignOut" title="Sign out" aria-label="Sign out">
-              <!-- door icon -->
-              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 17l1.41-1.41L9.83 14H20v-2H9.83l1.58-1.59L10 9l-5 5 5 5zM4 5h8V3H4c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h8v-2H4V5z"/></svg>
-            </button>
-          </div>
-        </div>
-
         <!-- Summary tiles -->
         <div class="tiles">
           <div class="tile" id="tileNew">
@@ -124,7 +117,7 @@
               <span id="listTitle">Assigned activity</span>
               <span class="list-count" id="listCount"></span>
             </div>
-            <button class="icon-btn subtle" id="btnFilter" title="Focus filters" aria-label="Focus filters">
+            <button class="icon-btn subtle" id="btnFilter" title="Toggle sort" aria-label="Toggle sort">
               <!-- sliders icon -->
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 18h4v-2h-4v2zM3 6v2h18V6H3zm3 7h12v-2H6v2z"/></svg>
             </button>
@@ -137,37 +130,7 @@
             </div>
 
             <div class="filter-row">
-              <div class="select small">
-                <select id="sortSelect" aria-label="Sort by">
-                  <option value="visits" selected>Sort: Visits</option>
-                  <option value="pages">Sort: Pages</option>
-                  <option value="recent">Sort: Recent</option>
-                  <option value="company">Sort: Company A-Z</option>
-                </select>
-                <svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10l5 5 5-5z"/></svg>
-              </div>
-
-              <div class="select small">
-                <select id="minVisitsSelect" aria-label="Minimum visits">
-                  <option value="0" selected>Visits: All</option>
-                  <option value="2">Visits: 2+</option>
-                  <option value="5">Visits: 5+</option>
-                  <option value="10">Visits: 10+</option>
-                  <option value="25">Visits: 25+</option>
-                </select>
-                <svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10l5 5 5-5z"/></svg>
-              </div>
-
-              <label class="toggle" for="newOnlyToggle">
-                <input type="checkbox" id="newOnlyToggle" />
-                <span>New only</span>
-              </label>
-
-              <label class="toggle" for="hideGenericToggle">
-                <input type="checkbox" id="hideGenericToggle" checked />
-                <span>Hide generic</span>
-              </label>
-
+              <div class="filter-summary" id="filterSummary"></div>
               <button class="link-btn" id="btnClearFilters" type="button">Clear</button>
             </div>
           </div>

@@ -39,6 +39,7 @@ const state = {
   ipUnlocked: false,
   activeBusinessId: null,
   longRangeTopCompanies: null,
+  activeTile: "visits",
   rangeStart: null,
   activeTab: "activity",
   filters: {
@@ -47,6 +48,7 @@ const state = {
     sort: "visits",
     newOnly: false,
     hideGeneric: DEFAULT_HIDE_GENERIC,
+    returningOnly: false,
   },
 };
 
@@ -95,10 +97,12 @@ function setLoading(isLoading) {
   const signInBtn = $("#btnSignIn");
   const signOutBtn = $("#btnSignOut");
   const exploreBtn = $("#btnExplore");
+  const rangeSelect = $("#rangeSelect");
   if (refreshBtn) refreshBtn.disabled = !!isLoading;
   if (signInBtn) signInBtn.disabled = !!isLoading;
   if (signOutBtn) signOutBtn.disabled = !!isLoading;
   if (exploreBtn) exploreBtn.disabled = !!isLoading;
+  if (rangeSelect) rangeSelect.disabled = !!isLoading;
   if (isLoading) setStatus("Loading...", "warn");
 }
 
@@ -349,7 +353,8 @@ function filtersActive() {
     !!state.filters.query ||
     state.filters.minVisits > 0 ||
     state.filters.newOnly === true ||
-    state.filters.hideGeneric !== DEFAULT_HIDE_GENERIC
+    state.filters.hideGeneric !== DEFAULT_HIDE_GENERIC ||
+    state.filters.returningOnly === true
   );
 }
 
@@ -359,11 +364,13 @@ function getFilteredBusinesses(list) {
   const minVisits = Number(state.filters.minVisits || 0);
   const requireNew = !!state.filters.newOnly;
   const hideGeneric = !!state.filters.hideGeneric;
+  const requireReturning = !!state.filters.returningOnly;
   const rangeStart = state.rangeStart || getRangeStartDate(state.rangeDays);
 
   return list.filter((business) => {
     if (hideGeneric && isGenericBusinessName(getBusinessName(business))) return false;
     if (minVisits && getVisitCount(business) < minVisits) return false;
+    if (requireReturning && getVisitCount(business) <= 1) return false;
     if (requireNew && !isNewBusiness(business, rangeStart)) return false;
     if (query) {
       const hay = getBusinessSearchText(business);
@@ -377,19 +384,26 @@ function sortBusinesses(list) {
   const mode = state.filters.sort || "visits";
   const sorted = [...list];
   if (mode === "pages") {
-    return sorted.sort((a, b) => getPageCount(b) - getPageCount(a));
-  }
-  if (mode === "recent") {
     return sorted.sort((a, b) => {
+      const diff = getPageCount(b) - getPageCount(a);
+      if (diff !== 0) return diff;
+      const visitsDiff = getVisitCount(b) - getVisitCount(a);
+      if (visitsDiff !== 0) return visitsDiff;
       const ad = getLastVisitDate(a)?.getTime() || 0;
       const bd = getLastVisitDate(b)?.getTime() || 0;
       return bd - ad;
     });
   }
-  if (mode === "company") {
-    return sorted.sort((a, b) =>
-      getBusinessName(a).localeCompare(getBusinessName(b))
-    );
+  if (mode === "visits") {
+    return sorted.sort((a, b) => {
+      const diff = getVisitCount(b) - getVisitCount(a);
+      if (diff !== 0) return diff;
+      const pagesDiff = getPageCount(b) - getPageCount(a);
+      if (pagesDiff !== 0) return pagesDiff;
+      const ad = getLastVisitDate(a)?.getTime() || 0;
+      const bd = getLastVisitDate(b)?.getTime() || 0;
+      return bd - ad;
+    });
   }
   return sorted.sort(activitySort);
 }
@@ -605,6 +619,7 @@ function renderSignedOut() {
   state.mode = "signed_out";
   show("#signinPanel");
   hide("#dashPanel");
+  hide("#repPill");
   setActiveTab("activity");
   const repPill = $("#repPill");
   if (repPill) repPill.innerHTML = "";
@@ -615,6 +630,12 @@ function renderSignedOut() {
   if (refreshBtn) refreshBtn.disabled = true;
   const settingsBtn = $("#btnSettings");
   if (settingsBtn) settingsBtn.disabled = false;
+  const rangeSelect = $("#rangeSelect");
+  if (rangeSelect) rangeSelect.disabled = true;
+  const signOutBtn = $("#btnSignOut");
+  if (signOutBtn) signOutBtn.disabled = true;
+  setActiveTile("visits");
+  updateSortToggleLabel();
   setText("#valNew", "0");
   setText("#valVisits", "0");
   setText("#valReturning", "0");
@@ -624,6 +645,7 @@ function renderSignedIn() {
   state.mode = "assigned";
   hide("#signinPanel");
   show("#dashPanel");
+  show("#repPill");
   setListTitle("Assigned activity");
   setSignOutLabel(state.mode);
   renderRepPill();
@@ -631,12 +653,19 @@ function renderSignedIn() {
   setRangeSelect(state.rangeDays);
   const refreshBtn = $("#btnRefresh");
   if (refreshBtn) refreshBtn.disabled = false;
+  const rangeSelect = $("#rangeSelect");
+  if (rangeSelect) rangeSelect.disabled = false;
+  const signOutBtn = $("#btnSignOut");
+  if (signOutBtn) signOutBtn.disabled = false;
+  setActiveTile("visits");
+  updateSortToggleLabel();
 }
 
 function renderExplore() {
   state.mode = "all";
   hide("#signinPanel");
   show("#dashPanel");
+  show("#repPill");
   setListTitle("All activity");
   setSignOutLabel(state.mode);
   renderRepPill();
@@ -644,6 +673,12 @@ function renderExplore() {
   setRangeSelect(state.rangeDays);
   const refreshBtn = $("#btnRefresh");
   if (refreshBtn) refreshBtn.disabled = false;
+  const rangeSelect = $("#rangeSelect");
+  if (rangeSelect) rangeSelect.disabled = false;
+  const signOutBtn = $("#btnSignOut");
+  if (signOutBtn) signOutBtn.disabled = false;
+  setActiveTile("visits");
+  updateSortToggleLabel();
 }
 
 function renderRepPill() {
@@ -713,21 +748,145 @@ function updateActivityView() {
   renderActivityList(filtered);
   updateListCount(filtered.length, state.businesses.length);
   renderReports(filtered);
+  updateFilterSummary();
+  updateSortToggleLabel();
+}
+
+function setActiveTile(tile) {
+  state.activeTile = tile;
+  ["tileNew", "tileVisits", "tileReturning"].forEach((id) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const isActive =
+      (tile === "new" && id === "tileNew") ||
+      (tile === "visits" && id === "tileVisits") ||
+      (tile === "returning" && id === "tileReturning");
+    el.classList.toggle("active", isActive);
+  });
+  updateFilterSummary();
+}
+
+function updateFilterSummary() {
+  const el = $("#filterSummary");
+  if (!el) return;
+  const bits = [];
+  if (state.activeTile === "new") {
+    bits.push("New visits");
+  } else if (state.activeTile === "returning") {
+    bits.push("Returning");
+  } else {
+    if (state.filters.minVisits >= 25) bits.push("25+ visits");
+    else if (state.filters.minVisits >= 10) bits.push("10+ visits");
+    else if (state.filters.minVisits >= 5) bits.push("5+ visits");
+    else if (state.filters.minVisits >= 2) bits.push("2+ visits");
+    else bits.push("All visits");
+  }
+  if (state.filters.hideGeneric) bits.push("Hide generic");
+  if (state.filters.query) bits.push(`Search: ${state.filters.query}`);
+  el.textContent = bits.join(" | ");
+}
+
+function sortLabel() {
+  if (state.filters.sort === "pages") return "Pages";
+  if (state.filters.sort === "activity") return "Visits + Pages";
+  return "Visits";
+}
+
+function updateSortToggleLabel() {
+  const btn = $("#btnFilter");
+  if (!btn) return;
+  const label = `Sort: ${sortLabel()}`;
+  btn.setAttribute("title", label);
+  btn.setAttribute("aria-label", label);
+}
+
+function toggleSortMode() {
+  const current = state.filters.sort || "visits";
+  const next = current === "visits" ? "pages" : current === "pages" ? "activity" : "visits";
+  state.filters.sort = next;
+  updateActivityView();
+}
+
+function applyTileNew() {
+  state.filters.newOnly = true;
+  state.filters.returningOnly = false;
+  state.filters.minVisits = 0;
+  state.filters.sort = "pages";
+  setActiveTile("new");
+  updateActivityView();
+}
+
+function applyTileReturning() {
+  state.filters.newOnly = false;
+  state.filters.returningOnly = true;
+  state.filters.minVisits = 2;
+  state.filters.sort = "visits";
+  setActiveTile("returning");
+  updateActivityView();
+}
+
+function applyTileVisits() {
+  state.filters.newOnly = false;
+  state.filters.returningOnly = false;
+  state.filters.sort = "visits";
+  setActiveTile("visits");
+  updateActivityView();
+  openVisitsFilterModal();
+}
+
+function openVisitsFilterModal() {
+  const options = [
+    { label: "All visits", value: 0 },
+    { label: "2+ visits", value: 2 },
+    { label: "5+ visits", value: 5 },
+    { label: "10+ visits", value: 10 },
+    { label: "25+ visits", value: 25 },
+  ];
+  const optionHtml = options
+    .map(
+      (opt) => `
+        <button class="option-btn ${state.filters.minVisits === opt.value ? "active" : ""}" type="button" data-min="${opt.value}">
+          ${escapeHtml(opt.label)}
+        </button>
+      `
+    )
+    .join("");
+  const hideChecked = state.filters.hideGeneric ? "checked" : "";
+  const bodyHtml = `
+    <div class="options">
+      ${optionHtml}
+    </div>
+    <label class="toggle option-toggle">
+      <input type="checkbox" id="modalHideGeneric" ${hideChecked} />
+      <span>Hide generic</span>
+    </label>
+    <div class="modal-actions">
+      <button class="secondary-btn small" id="btnApplyVisitFilter" type="button">Apply</button>
+    </div>
+  `;
+  openModal("Visit filters", bodyHtml);
+
+  $$(".option-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      $$(".option-btn").forEach((el) => el.classList.remove("active"));
+      btn.classList.add("active");
+    });
+  });
+
+  $("#btnApplyVisitFilter")?.addEventListener("click", () => {
+    const active = document.querySelector(".option-btn.active");
+    const min = active ? Number(active.getAttribute("data-min") || 0) : 0;
+    state.filters.minVisits = Number.isFinite(min) ? min : 0;
+    state.filters.hideGeneric = $("#modalHideGeneric")?.checked ?? state.filters.hideGeneric;
+    closeModal();
+    updateActivityView();
+  });
 }
 
 function syncFiltersFromUI() {
   const searchInput = $("#searchInput");
-  const sortSelect = $("#sortSelect");
-  const minVisitsSelect = $("#minVisitsSelect");
-  const newOnlyToggle = $("#newOnlyToggle");
-  const hideGenericToggle = $("#hideGenericToggle");
 
   state.filters.query = searchInput ? searchInput.value.trim() : "";
-  state.filters.sort = sortSelect ? sortSelect.value : "visits";
-  const minVisits = minVisitsSelect ? Number(minVisitsSelect.value || 0) : 0;
-  state.filters.minVisits = Number.isFinite(minVisits) ? minVisits : 0;
-  state.filters.newOnly = newOnlyToggle ? newOnlyToggle.checked : false;
-  state.filters.hideGeneric = hideGenericToggle ? hideGenericToggle.checked : false;
 }
 
 function applyFilterDefaults() {
@@ -737,22 +896,17 @@ function applyFilterDefaults() {
     sort: "visits",
     newOnly: false,
     hideGeneric: DEFAULT_HIDE_GENERIC,
+    returningOnly: false,
   };
 }
 
 function clearFilters() {
   applyFilterDefaults();
   const searchInput = $("#searchInput");
-  const sortSelect = $("#sortSelect");
-  const minVisitsSelect = $("#minVisitsSelect");
-  const newOnlyToggle = $("#newOnlyToggle");
-  const hideGenericToggle = $("#hideGenericToggle");
 
   if (searchInput) searchInput.value = "";
-  if (sortSelect) sortSelect.value = "visits";
-  if (minVisitsSelect) minVisitsSelect.value = "0";
-  if (newOnlyToggle) newOnlyToggle.checked = false;
-  if (hideGenericToggle) hideGenericToggle.checked = DEFAULT_HIDE_GENERIC;
+  setActiveTile("visits");
+  state.filters.sort = "visits";
 
   updateActivityView();
 }
@@ -889,10 +1043,10 @@ function activityRow(business) {
   const tag = isNew ? `<span class="tag">New</span>` : "";
   const detailItems = [];
   if (info.industry) detailItems.push(`Industry: ${info.industry}`);
+  if (info.address) detailItems.push(`Address: ${info.address}`);
   if (info.website) detailItems.push(`Website: ${info.website}`);
   if (info.phone) detailItems.push(`Phone: ${info.phone}`);
   if (info.employees) detailItems.push(`Employees: ${info.employees}`);
-  if (info.address) detailItems.push(`Address: ${info.address}`);
   const detailHtml = detailItems.length
     ? detailItems
         .slice(0, 4)
@@ -1118,12 +1272,16 @@ function renderVisitsList(container, visits) {
       const dateText = formatDateTime(getVisitDate(visit) || getVisitStartDate(visit));
       const pages = getVisitPages(visit);
       const referrer = formatReferrer(visit);
-      const ip = visit._ip ? `IP ${visit._ip}` : isIpAllowed() ? "IP n/a" : "";
+      const ip = visit._ip
+        ? `IP ${visit._ip}`
+        : isIpAllowed()
+        ? "IP n/a"
+        : "IP locked";
       const metaParts = [];
+      if (ip) metaParts.push(ip);
       if (pages) metaParts.push(`${pages} page${pages === 1 ? "" : "s"}`);
       if (referrer) metaParts.push(referrer);
-      if (ip) metaParts.push(ip);
-      const meta = metaParts.join(" • ");
+      const meta = metaParts.join(" | ");
       return `
         <div class="visit-item">
           <div class="visit-date">${escapeHtml(dateText)}</div>
@@ -2130,6 +2288,7 @@ function onSignOut() {
     const grid = $("#reportsGrid");
     if (grid) grid.innerHTML = "";
     updateListCount(0, 0);
+    clearFilters();
     setStatus("Ready", "good");
     return;
   }
@@ -2147,6 +2306,7 @@ function onSignOut() {
   const grid = $("#reportsGrid");
   if (grid) grid.innerHTML = "";
   updateListCount(0, 0);
+  clearFilters();
   setStatus("Ready", "good");
 }
 
@@ -2244,8 +2404,7 @@ function showAccountModal() {
 }
 
 function focusRangeSelect() {
-  const search = $("#searchInput");
-  if (search) search.focus();
+  toggleSortMode();
 }
 
 // ---------- escaping ----------
@@ -2277,11 +2436,10 @@ function boot() {
   $("#btnFilter")?.addEventListener("click", focusRangeSelect);
   $("#btnCloseModal")?.addEventListener("click", closeModal);
   $("#searchInput")?.addEventListener("input", onFiltersChange);
-  $("#sortSelect")?.addEventListener("change", onFiltersChange);
-  $("#minVisitsSelect")?.addEventListener("change", onFiltersChange);
-  $("#newOnlyToggle")?.addEventListener("change", onFiltersChange);
-  $("#hideGenericToggle")?.addEventListener("change", onFiltersChange);
   $("#btnClearFilters")?.addEventListener("click", clearFilters);
+  $("#tileNew")?.addEventListener("click", applyTileNew);
+  $("#tileVisits")?.addEventListener("click", applyTileVisits);
+  $("#tileReturning")?.addEventListener("click", applyTileReturning);
   $$(".tab").forEach((btn) => {
     btn.addEventListener("click", () => setActiveTab(btn.dataset.tab || "activity"));
   });

@@ -52,25 +52,30 @@ html,body{height:100%; margin:0; background:transparent; font-family:var(--font)
   padding:8px 10px;
   border-bottom:1px solid rgba(15,23,42,.08);
   backdrop-filter: blur(8px);
+  gap:8px;
 }
 
-.wf-brand{
-  display:flex; align-items:center; gap:8px;
+.wf-header-left{
   min-width:0;
+  flex:1;
+  display:flex;
+  align-items:center;
 }
-.wf-dot{
-  width:10px; height:10px; border-radius:999px;
-  background: radial-gradient(circle at 30% 30%, #fff, var(--accent));
-  box-shadow: 0 0 0 4px rgba(42,91,215,.14);
+.wf-header-right{
+  display:flex;
+  align-items:center;
+  gap:6px;
 }
-.wf-title{
-  font-weight:650;
-  letter-spacing:.2px;
-  font-size:13px;
-  white-space:nowrap;
+.header-select{
+  height:28px;
 }
+.header-select select{
+  height:28px;
+  font-size:11px;
+  padding-left:8px;
+}
+.header-select .chev{right:6px; width:14px; height:14px;}
 
-.wf-actions{display:flex; gap:6px;}
 .icon-btn{
   width:30px; height:30px;
   border-radius:10px;
@@ -244,6 +249,7 @@ input[type="checkbox"]:checked::after{transform: scale(1);}
   font-weight:750;
   letter-spacing:.3px;
   font-size:12px;
+  max-width:160px;
 }
 .rep-pill .mini{
   width:18px; height:18px;
@@ -304,6 +310,10 @@ select{
   transition: background .15s ease, border-color .15s ease;
 }
 .tile:hover{background: rgba(15,23,42,.1); border-color: rgba(15,23,42,.18);}
+.tile.active{
+  background: rgba(42,91,215,.16);
+  border-color: rgba(42,91,215,.35);
+}
 .tile-ic{
   width:26px; height:26px;
   border-radius:10px;
@@ -390,6 +400,16 @@ select{
   gap:6px;
 }
 .filter-row .link-btn{margin-left:0;}
+.filter-summary{
+  font-size:10px;
+  color: var(--muted2);
+  font-weight:700;
+  flex:1;
+  min-width:0;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
 .select.small{min-width:110px; height:26px;}
 .select.small select{
   height:26px;
@@ -726,6 +746,32 @@ select{
   gap:8px;
   margin:6px 0 8px;
 }
+.options{
+  display:flex;
+  flex-direction:column;
+  gap:6px;
+  margin-bottom:8px;
+}
+.option-btn{
+  width:100%;
+  text-align:left;
+  padding:7px 10px;
+  border-radius:12px;
+  border:1px solid rgba(15,23,42,.14);
+  background: rgba(15,23,42,.04);
+  font-size:11px;
+  font-weight:700;
+  color: var(--text);
+  cursor:pointer;
+}
+.option-btn.active{
+  background: rgba(42,91,215,.15);
+  border-color: rgba(42,91,215,.35);
+  color: #1b2d5a;
+}
+.option-toggle{
+  align-self:flex-start;
+}
 .pages-list{
   display:flex;
   flex-direction:column;
@@ -959,6 +1005,11 @@ select{
 
 @media (max-width: 340px), (max-height: 340px) {
   .wf-header{height:38px;}
+  .wf-header-right{gap:4px;}
+  .header-select{min-width:62px;}
+  .header-select select{padding-left:6px; font-size:10px;}
+  .icon-btn{width:26px; height:26px; border-radius:8px;}
+  .rep-pill{padding:5px 8px; font-size:10px; max-width:110px;}
   .wf-main{padding:6px;}
   .panel{padding:6px;}
   .panel-top{margin-bottom:6px;}
@@ -977,6 +1028,7 @@ select{
     padding-bottom:2px;
     -webkit-overflow-scrolling: touch;
   }
+  .filter-summary{font-size:9px;}
   .filter-row::-webkit-scrollbar{height:6px;}
   .filter-row::-webkit-scrollbar-thumb{
     background: rgba(15,23,42,.22);
