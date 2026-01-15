@@ -36,6 +36,7 @@ const state = {
   visitsCache: {},
   visitStatsCache: {},
   visitDetailsCache: {},
+  visitIpCache: {},
   ipUnlocked: false,
   activeBusinessId: null,
   longRangeTopCompanies: null,
@@ -1302,6 +1303,8 @@ function extractVisitIp(details, visit) {
   const keys = [
     "IPAddress",
     "IpAddress",
+    "IpAddressV4",
+    "IpAddressV6",
     "IP",
     "Ip",
     "IPAddressV4",
@@ -1310,6 +1313,20 @@ function extractVisitIp(details, visit) {
     "IPV6",
     "VisitorIP",
     "VisitorIp",
+    "VisitorIPAddress",
+    "VisitorIpAddress",
+    "ClientIP",
+    "ClientIp",
+    "ClientIPAddress",
+    "ClientIpAddress",
+    "RemoteIP",
+    "RemoteIp",
+    "RemoteAddress",
+    "RemoteAddr",
+    "SourceIP",
+    "SourceIp",
+    "IP Address",
+    "IP_Address",
   ];
   const fromDetails = pick(details || {}, keys, "");
   if (fromDetails) return fromDetails;
@@ -1377,17 +1394,38 @@ async function enrichVisitsWithIps(visits) {
     if (visit._ip) continue;
     const visitId = getVisitId(visit);
     if (!visitId) continue;
-    const cached = state.visitDetailsCache[String(visitId)];
+    const visitKey = String(visitId);
+    const cachedIp = state.visitIpCache?.[visitKey];
+    if (cachedIp) {
+      visit._ip = cachedIp;
+      continue;
+    }
+    const directIp = extractVisitIp(null, visit);
+    if (directIp) {
+      visit._ip = directIp;
+      if (!state.visitIpCache) state.visitIpCache = {};
+      state.visitIpCache[visitKey] = directIp;
+      continue;
+    }
+    const cached = state.visitDetailsCache[visitKey];
     if (cached) {
       const ip = extractVisitIp(cached, visit);
-      if (ip) visit._ip = ip;
+      if (ip) {
+        visit._ip = ip;
+        if (!state.visitIpCache) state.visitIpCache = {};
+        state.visitIpCache[visitKey] = ip;
+      }
       continue;
     }
     try {
       const details = await getVisitDetails(visitId);
-      state.visitDetailsCache[String(visitId)] = details;
+      state.visitDetailsCache[visitKey] = details;
       const ip = extractVisitIp(details, visit);
-      if (ip) visit._ip = ip;
+      if (ip) {
+        visit._ip = ip;
+        if (!state.visitIpCache) state.visitIpCache = {};
+        state.visitIpCache[visitKey] = ip;
+      }
     } catch (e) {
       console.error(e);
     }
@@ -1442,9 +1480,20 @@ function getVisitBusinessId(visit) {
   return pick(visit, ["BusinessID", "BusinessId", "ID", "Id"], "");
 }
 
+function rememberVisitIp(visit) {
+  const visitId = getVisitId(visit);
+  if (!visitId) return;
+  const ip = extractVisitIp(visit, visit);
+  if (!ip) return;
+  if (!state.visitIpCache) state.visitIpCache = {};
+  const key = String(visitId);
+  if (!state.visitIpCache[key]) state.visitIpCache[key] = ip;
+}
+
 function accumulateVisitStats(map, visit) {
   const businessid = getVisitBusinessId(visit);
   if (!businessid) return;
+  rememberVisitIp(visit);
   const entry = map.get(businessid) || {
     businessid: String(businessid),
     visits: 0,
@@ -2163,6 +2212,7 @@ function clearSession() {
   state.visitsCache = {};
   state.visitStatsCache = {};
   state.visitDetailsCache = {};
+  state.visitIpCache = {};
   state.ipUnlocked = false;
   state.longRangeTopCompanies = null;
   state.rangeStart = null;
@@ -2280,6 +2330,7 @@ function onSignOut() {
     state.visitsCache = {};
     state.visitStatsCache = {};
     state.visitDetailsCache = {};
+    state.visitIpCache = {};
     state.ipUnlocked = false;
     state.longRangeTopCompanies = null;
     state.businesses = [];
@@ -2297,6 +2348,7 @@ function onSignOut() {
   state.visitsCache = {};
   state.visitStatsCache = {};
   state.visitDetailsCache = {};
+  state.visitIpCache = {};
   state.ipUnlocked = false;
   state.longRangeTopCompanies = null;
   state.businesses = [];
@@ -2319,6 +2371,7 @@ function onRangeChange() {
   state.visitsCache = {};
   state.visitStatsCache = {};
   state.visitDetailsCache = {};
+  state.visitIpCache = {};
   if (state.mode === "assigned") saveSession();
   else localStorage.setItem("lf_rangeDays", String(state.rangeDays || DEFAULT_RANGE_DAYS));
   refresh().catch(() => {});
@@ -2335,6 +2388,7 @@ async function onExplore() {
     state.visitsCache = {};
     state.visitStatsCache = {};
     state.visitDetailsCache = {};
+    state.visitIpCache = {};
     state.ipUnlocked = false;
     state.longRangeTopCompanies = null;
     renderExplore();
