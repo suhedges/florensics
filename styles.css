@@ -448,6 +448,52 @@ select{
   padding:5px 8px;
   border-radius:999px;
 }
+.secondary-btn.small{
+  height:30px;
+  padding:0 10px;
+  border-radius:10px;
+  font-size:11px;
+}
+.pages{
+  margin-top:8px;
+  display:flex;
+  flex-direction:column;
+  gap:8px;
+}
+.pages-list{
+  display:flex;
+  flex-direction:column;
+  gap:6px;
+}
+.page-item{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:8px;
+  padding:6px 8px;
+  border-radius:10px;
+  border:1px solid rgba(15,23,42,.12);
+  background: rgba(15,23,42,.04);
+  font-size:11px;
+}
+.page-url{
+  min-width:0;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+  flex:1;
+}
+.page-link, .page-text{
+  color:#1f2f5c;
+  font-weight:700;
+  text-decoration:none;
+}
+.page-link:hover{text-decoration:underline;}
+.page-count{
+  font-weight:800;
+  color: var(--text);
+  flex:0 0 auto;
+}
 .link{
   color:#1f2f5c;
   font-weight:700;

@@ -11,6 +11,9 @@ const WORKER_BASE = "https://leadforensics-proxy.sethh.workers.dev";
 
 const DEFAULT_RANGE_DAYS = 7;
 const LOGIN_LOOKBACK_DAYS = 30;
+const MAX_VISIT_LOOKUP = 6;
+const MAX_PAGE_RESULTS = 25;
+const PAGE_PAGE_SIZE = 10;
 
 const state = {
   repCode: null,
@@ -21,6 +24,7 @@ const state = {
   businesses: [],
   mode: "signed_out",
   assignedSource: "assigned",
+  pagesCache: {},
 };
 
 // ---------- tiny DOM helpers ----------
@@ -362,6 +366,39 @@ async function getBusiness(businessid) {
   return lfFetch("/WebApi_v2/Business/GetBusiness", { businessid });
 }
 
+async function getVisitsByBusiness(businessid, days, pageSize = 5, pageNo = 1) {
+  const { datefrom, dateto } = rangeFromDays(days);
+  const data = await lfFetch("/WebApi_v2/Visit/GetVisitsByBusiness", {
+    businessid,
+    datefrom,
+    dateto,
+    pagesize: pageSize,
+    pageno: pageNo,
+  });
+
+  const primary = asArray(data);
+  const list = primary.length
+    ? primary
+    : asArray(pick(data, ["SiteVisitList", "VisitList", "Visits", "Results"], [])) || [];
+
+  return list;
+}
+
+async function getPagesByVisit(visitid, pageSize = PAGE_PAGE_SIZE, pageNo = 1) {
+  const data = await lfFetch("/WebApi_v2/Page/GetPagesByVisit", {
+    visitid,
+    pagesize: pageSize,
+    pageno: pageNo,
+  });
+
+  const primary = asArray(data);
+  const list = primary.length
+    ? primary
+    : asArray(pick(data, ["PageVisitList", "Pages", "PageList", "Results"], [])) || [];
+
+  return list;
+}
+
 // ---------- UI rendering ----------
 function renderSignedOut() {
   state.mode = "signed_out";
@@ -446,6 +483,18 @@ function getLastVisitDate(business) {
   return parseDate(
     pick(business, ["LastVisitDate", "MostRecentVisitDate", "LastVisited", "VisitDate"], "")
   );
+}
+
+function activitySort(a, b) {
+  const av = getVisitCount(a);
+  const bv = getVisitCount(b);
+  if (bv !== av) return bv - av;
+  const ap = getPageCount(a);
+  const bp = getPageCount(b);
+  if (bp !== ap) return bp - ap;
+  const ad = getLastVisitDate(a)?.getTime() || 0;
+  const bd = getLastVisitDate(b)?.getTime() || 0;
+  return bd - ad;
 }
 
 function formatShortDate(value) {
@@ -539,13 +588,132 @@ function renderActivityList(list) {
     return;
   }
 
-  const sorted = [...list].sort((a, b) => {
-    const av = getLastVisitDate(a)?.getTime() || 0;
-    const bv = getLastVisitDate(b)?.getTime() || 0;
-    return bv - av;
-  });
+  const sorted = [...list].sort(activitySort);
 
   wrap.innerHTML = sorted.map(activityRow).join("");
+}
+
+function getVisitId(visit) {
+  return pick(visit, ["VisitID", "VisitId", "ID", "Id"], "");
+}
+
+function getVisitDate(visit) {
+  return parseDate(
+    pick(visit, ["VisitDate", "VisitStartDate", "DateVisited", "StartDate"], "")
+  );
+}
+
+function extractPageUrl(page) {
+  return String(
+    pick(page, ["PageUrl", "PageURL", "Url", "URL", "Page", "PageName", "Location"], "")
+  ).trim();
+}
+
+function extractPageTitle(page) {
+  return String(pick(page, ["PageTitle", "Title", "Name"], "")).trim();
+}
+
+function renderPagesList(container, pages) {
+  if (!container) return;
+  if (!pages.length) {
+    container.innerHTML = `<div class="empty">No page visits in this range.</div>`;
+    return;
+  }
+
+  const rows = pages
+    .map((item) => {
+      const urlText = escapeHtml(item.url);
+      const titleText = escapeAttr(item.title || item.url);
+      const label = item.url.startsWith("http")
+        ? `<a class="page-link" href="${escapeAttr(item.url)}" target="_blank" rel="noopener" title="${titleText}">${urlText}</a>`
+        : `<span class="page-text" title="${titleText}">${urlText}</span>`;
+      return `
+        <div class="page-item">
+          <div class="page-url">${label}</div>
+          <div class="page-count">${item.count}</div>
+        </div>
+      `;
+    })
+    .join("");
+
+  container.innerHTML = rows;
+}
+
+function aggregatePages(pages) {
+  const map = new Map();
+  for (const page of pages) {
+    const url = extractPageUrl(page);
+    if (!url) continue;
+    const title = extractPageTitle(page);
+    const entry = map.get(url) || { url, title: title || "", count: 0 };
+    entry.count += 1;
+    if (!entry.title && title) entry.title = title;
+    map.set(url, entry);
+  }
+  return Array.from(map.values())
+    .sort((a, b) => b.count - a.count)
+    .slice(0, MAX_PAGE_RESULTS);
+}
+
+async function togglePagesForBusiness(businessid) {
+  const btn = $("#btnLoadPages");
+  const wrap = $("#pagesList");
+  if (!btn || !wrap) return;
+
+  const isOpen = wrap.dataset.state === "open";
+  if (isOpen) {
+    wrap.dataset.state = "closed";
+    wrap.innerHTML = "";
+    btn.textContent = "Show visited pages";
+    return;
+  }
+
+  wrap.dataset.state = "open";
+  btn.textContent = "Hide visited pages";
+  btn.disabled = true;
+
+  const cached = state.pagesCache[businessid];
+  if (cached) {
+    renderPagesList(wrap, cached);
+    btn.disabled = false;
+    return;
+  }
+
+  wrap.innerHTML = `<div class="empty">Loading pages...</div>`;
+
+  try {
+    const visits = await getVisitsByBusiness(businessid, state.rangeDays, MAX_VISIT_LOOKUP, 1);
+    const sortedVisits = [...visits].sort((a, b) => {
+      const ad = getVisitDate(a)?.getTime() || 0;
+      const bd = getVisitDate(b)?.getTime() || 0;
+      return bd - ad;
+    });
+    const visitIds = sortedVisits
+      .map((visit) => getVisitId(visit))
+      .filter(Boolean)
+      .slice(0, MAX_VISIT_LOOKUP);
+
+    if (!visitIds.length) {
+      wrap.innerHTML = `<div class="empty">No visit details found in this range.</div>`;
+      return;
+    }
+
+    const pageResults = [];
+    for (const visitId of visitIds) {
+      const pages = await getPagesByVisit(visitId, PAGE_PAGE_SIZE, 1);
+      pageResults.push(...pages);
+      if (pageResults.length >= MAX_PAGE_RESULTS * 2) break;
+    }
+
+    const aggregated = aggregatePages(pageResults);
+    state.pagesCache[businessid] = aggregated;
+    renderPagesList(wrap, aggregated);
+  } catch (e) {
+    console.error(e);
+    wrap.innerHTML = `<div class="empty">Could not load page visits.</div>`;
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 // ---------- modal ----------
@@ -616,16 +784,44 @@ async function openBusinessModal(businessid) {
     if (visits) pills.push(`<span class="pill">${escapeHtml(String(visits))}V</span>`);
     if (pages) pills.push(`<span class="pill">${escapeHtml(String(pages))}P</span>`);
 
+    const pagesSection = `
+      <div class="pages">
+        <button class="secondary-btn small" id="btnLoadPages" type="button" data-bizid="${escapeAttr(
+          String(businessid || "")
+        )}">Show visited pages</button>
+        <div class="pages-list" id="pagesList" data-state="closed"></div>
+      </div>
+    `;
+
     const bodyHtml = rows.length
-      ? `<div class="kv">${rows.join("")}</div>${pills.length ? `<div class="pills">${pills.join("")}</div>` : ""}`
-      : `<div class="empty">No details available.</div>`;
+      ? `<div class="kv">${rows.join("")}</div>${pills.length ? `<div class="pills">${pills.join("")}</div>` : ""}${pagesSection}`
+      : `<div class="empty">No details available.</div>${pagesSection}`;
 
     const body = $("#modalBody");
     if (body) body.innerHTML = bodyHtml;
+
+    const btn = $("#btnLoadPages");
+    if (btn) {
+      btn.addEventListener("click", () => togglePagesForBusiness(String(businessid || "")));
+    }
   } catch (e) {
     setText("#modalTitle", "Details");
     const body = $("#modalBody");
-    if (body) body.innerHTML = `<div class="empty">Could not load details.</div>`;
+    if (body) {
+      body.innerHTML = `
+        <div class="empty">Could not load details.</div>
+        <div class="pages">
+          <button class="secondary-btn small" id="btnLoadPages" type="button" data-bizid="${escapeAttr(
+            String(businessid || "")
+          )}">Show visited pages</button>
+          <div class="pages-list" id="pagesList" data-state="closed"></div>
+        </div>
+      `;
+      const btn = $("#btnLoadPages");
+      if (btn) {
+        btn.addEventListener("click", () => togglePagesForBusiness(String(businessid || "")));
+      }
+    }
   }
 }
 
@@ -667,6 +863,7 @@ function clearSession() {
   state.repName = null;
   state.clientUserId = null;
   state.businesses = [];
+  state.pagesCache = {};
 }
 
 // ---------- main refresh ----------
@@ -757,12 +954,14 @@ async function onSignIn() {
 function onSignOut() {
   if (state.mode === "all") {
     renderSignedOut();
+    state.pagesCache = {};
     const wrap = $("#activityList");
     if (wrap) wrap.innerHTML = "";
     setStatus("Ready", "good");
     return;
   }
   clearSession();
+  state.pagesCache = {};
   renderSignedOut();
   const wrap = $("#activityList");
   if (wrap) wrap.innerHTML = "";
@@ -774,6 +973,7 @@ function onRangeChange() {
   if (!select) return;
   const days = getDaysFromRangeValue(select.value);
   state.rangeDays = days;
+  state.pagesCache = {};
   if (state.mode === "assigned") saveSession();
   else localStorage.setItem("lf_rangeDays", String(state.rangeDays || DEFAULT_RANGE_DAYS));
   refresh().catch(() => {});
@@ -786,6 +986,7 @@ async function onExplore() {
     state.repCode = null;
     state.repName = null;
     state.businesses = [];
+    state.pagesCache = {};
     renderExplore();
     await refresh();
   } catch (e) {
