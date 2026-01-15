@@ -115,18 +115,76 @@
           </div>
         </div>
 
-        <!-- List -->
-        <div class="list-head">
-          <div class="list-title">
-            <span id="listTitle">Assigned activity</span>
-          </div>
-          <button class="icon-btn subtle" id="btnFilter" title="Filters" aria-label="Filters">
-            <!-- sliders icon -->
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 18h4v-2h-4v2zM3 6v2h18V6H3zm3 7h12v-2H6v2z"/></svg>
+        <div class="tabs" role="tablist" aria-label="Dashboard views">
+          <button class="tab active" id="tabActivityBtn" data-tab="activity" role="tab" aria-selected="true">
+            Activity
+          </button>
+          <button class="tab" id="tabReportsBtn" data-tab="reports" role="tab" aria-selected="false">
+            Reports
           </button>
         </div>
 
-        <div class="list" id="activityList" role="list" aria-label="Activity list"></div>
+        <section class="tab-panel" id="panelActivity" role="tabpanel" aria-labelledby="tabActivityBtn">
+          <div class="list-head">
+            <div class="list-title">
+              <span id="listTitle">Assigned activity</span>
+              <span class="list-count" id="listCount"></span>
+            </div>
+            <button class="icon-btn subtle" id="btnFilter" title="Focus filters" aria-label="Focus filters">
+              <!-- sliders icon -->
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 18h4v-2h-4v2zM3 6v2h18V6H3zm3 7h12v-2H6v2z"/></svg>
+            </button>
+          </div>
+
+          <div class="filters" aria-label="Filters">
+            <div class="search">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15.5 14h-.79l-.28-.27A6 6 0 1 0 14 15.5l.27.28v.79l5 5L20.5 19l-5-5zm-5.5 0a4 4 0 1 1 0-8 4 4 0 0 1 0 8z"/></svg>
+              <input class="search-input" id="searchInput" type="search" placeholder="Search company or location" aria-label="Search company or location" />
+            </div>
+
+            <div class="filter-row">
+              <div class="select small">
+                <select id="sortSelect" aria-label="Sort by">
+                  <option value="visits" selected>Sort: Visits</option>
+                  <option value="pages">Sort: Pages</option>
+                  <option value="recent">Sort: Recent</option>
+                  <option value="company">Sort: Company A-Z</option>
+                </select>
+                <svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10l5 5 5-5z"/></svg>
+              </div>
+
+              <div class="select small">
+                <select id="minVisitsSelect" aria-label="Minimum visits">
+                  <option value="0" selected>Visits: All</option>
+                  <option value="2">Visits: 2+</option>
+                  <option value="5">Visits: 5+</option>
+                  <option value="10">Visits: 10+</option>
+                  <option value="25">Visits: 25+</option>
+                </select>
+                <svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10l5 5 5-5z"/></svg>
+              </div>
+
+              <label class="toggle" for="newOnlyToggle">
+                <input type="checkbox" id="newOnlyToggle" />
+                <span>New only</span>
+              </label>
+
+              <button class="link-btn" id="btnClearFilters" type="button">Clear</button>
+            </div>
+          </div>
+
+          <div class="list" id="activityList" role="list" aria-label="Activity list"></div>
+        </section>
+
+        <section class="tab-panel hidden" id="panelReports" role="tabpanel" aria-labelledby="tabReportsBtn">
+          <div class="reports" id="reportsWrap">
+            <div class="reports-head">
+              <div class="reports-title">Insights</div>
+              <div class="reports-note" id="reportsNote">All results</div>
+            </div>
+            <div class="reports-grid" id="reportsGrid"></div>
+          </div>
+        </section>
 
         <!-- Bottom tiny status -->
         <div class="status">
