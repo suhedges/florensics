@@ -15,8 +15,11 @@ const MAX_RANGE_DAYS = 30;
 const MAX_VISIT_LOOKUP = 6;
 const MAX_PAGE_RESULTS = 25;
 const PAGE_PAGE_SIZE = 10;
-const ALL_VISITS_PAGE_SIZE = 200;
-const MAX_ALL_VISIT_PAGES = 30;
+const ALL_VISITS_PAGE_SIZE = 20;
+const MAX_ALL_VISIT_PAGES = 300;
+const ALL_BUSINESS_PAGE_SIZE = 100;
+const MAX_ALL_BUSINESS_PAGES = 120;
+const VISIT_FETCH_CONCURRENCY = 6;
 const MAX_ACTIVITY_COMPANIES = 60;
 const VISIT_SUMMARY_PAGE_SIZE = 10;
 const DETAILS_BATCH_SIZE = 6;
@@ -128,13 +131,8 @@ function pad2(n) {
 }
 
 // Lead Forensics docs commonly show dd-mm-yyyy HH:MM:SS
-function lfDateTime(d, endOfDay = false) {
+function lfDateTime(d) {
   const dt = new Date(d);
-  if (endOfDay) {
-    dt.setHours(23, 59, 59, 0);
-  } else {
-    dt.setHours(0, 0, 0, 0);
-  }
   const dd = pad2(dt.getDate());
   const mm = pad2(dt.getMonth() + 1);
   const yyyy = dt.getFullYear();
@@ -154,21 +152,19 @@ function rangeFromDays(days, options = {}) {
   const safeDays = options.allowLongRange
     ? Math.max(1, Math.round(Number(days) || DEFAULT_RANGE_DAYS))
     : clampRangeDays(days);
-  const end = new Date();
-  const start = new Date();
-  start.setDate(end.getDate() - safeDays);
+  const end = options.end ? new Date(options.end) : new Date();
+  const start = options.start
+    ? new Date(options.start)
+    : new Date(end.getTime() - safeDays * 24 * 60 * 60 * 1000);
   return {
-    datefrom: lfDateTime(start, false),
-    dateto: lfDateTime(end, true),
+    datefrom: lfDateTime(start),
+    dateto: lfDateTime(end),
   };
 }
 
 function getRangeStartDate(days) {
   const safeDays = clampRangeDays(days);
-  const start = new Date();
-  start.setDate(start.getDate() - safeDays);
-  start.setHours(0, 0, 0, 0);
-  return start;
+  return new Date(Date.now() - safeDays * 24 * 60 * 60 * 1000);
 }
 
 function parseLfDate(value) {
@@ -280,6 +276,10 @@ function getBusinessName(business) {
     ["BusinessName", "Name", "CompanyName", "Business", "Company"],
     "Unknown Company"
   );
+}
+
+function getBusinessId(business) {
+  return pick(business, ["BusinessID", "BusinessId", "ID", "Id"], "");
 }
 
 function isGenericBusinessName(name) {
@@ -525,8 +525,8 @@ function findAssignedUserByCode(users, code) {
 }
 
 // ---------- Lead Forensics calls ----------
-async function getAllBusinesses(days, pageSize = 25, pageNo = 1) {
-  const { datefrom, dateto } = rangeFromDays(days);
+async function getAllBusinesses(days, pageSize = 25, pageNo = 1, range = null) {
+  const { datefrom, dateto } = range || rangeFromDays(days);
   const data = await lfFetch("/WebApi_v2/Business/GetAllBusinesses", {
     datefrom,
     dateto,
@@ -534,12 +534,7 @@ async function getAllBusinesses(days, pageSize = 25, pageNo = 1) {
     pageno: pageNo,
   });
 
-  const primary = asArray(data);
-  const list = primary.length
-    ? primary
-    : asArray(pick(data, ["BusinessList", "Businesses", "Business", "Results"], [])) || [];
-
-  return list;
+  return extractBusinessList(data);
 }
 
 async function getBusinessesByAssignedTo(clientuserid, days, pageSize = 25, pageNo = 1) {
@@ -574,19 +569,107 @@ function extractVisitList(data) {
   return { visits: list, pageCount, recordCount };
 }
 
+function extractBusinessList(data) {
+  const primary = asArray(data);
+  const list = primary.length
+    ? primary
+    : asArray(pick(data, ["BusinessList", "Businesses", "Business", "Results"], [])) || [];
+  const pageCount = toNumber(pick(data, ["PageCount", "pagecount"], 0));
+  const recordCount = toNumber(pick(data, ["RecordCount", "recordcount"], list.length));
+  return { businesses: list, pageCount, recordCount };
+}
+
 async function getAllVisitsResponse(
   days,
   pageSize = ALL_VISITS_PAGE_SIZE,
   pageNo = 1,
-  allowLongRange = false
+  allowLongRange = false,
+  range = null
 ) {
-  const { datefrom, dateto } = rangeFromDays(days, { allowLongRange });
+  const { datefrom, dateto } = range || rangeFromDays(days, { allowLongRange });
   return lfFetch("/WebApi_v2/Visit/GetAllVisits", {
     datefrom,
     dateto,
     pagesize: pageSize,
     pageno: pageNo,
   });
+}
+
+async function collectAllVisitStats(days, options = {}) {
+  const allowLongRange = !!options.allowLongRange;
+  const pageSize = options.pageSize || ALL_VISITS_PAGE_SIZE;
+  const range = rangeFromDays(days, { allowLongRange, end: options.rangeEnd });
+  const first = await getAllVisitsResponse(days, pageSize, 1, allowLongRange, range);
+  const { visits, pageCount, recordCount } = extractVisitList(first);
+  const statsMap = new Map();
+  visits.forEach((visit) => accumulateVisitStats(statsMap, visit));
+
+  const totalPages = Math.max(1, pageCount || 1);
+  const maxPages = Math.min(totalPages, options.maxPages || MAX_ALL_VISIT_PAGES);
+  const concurrency = Math.max(1, options.concurrency || VISIT_FETCH_CONCURRENCY);
+  const pages = [];
+  for (let page = 2; page <= maxPages; page += 1) pages.push(page);
+
+  let errorCount = 0;
+  for (let i = 0; i < pages.length; i += concurrency) {
+    const batch = pages.slice(i, i + concurrency);
+    const results = await Promise.all(
+      batch.map(async (pageNo) => {
+        try {
+          return await getAllVisitsResponse(
+            days,
+            pageSize,
+            pageNo,
+            allowLongRange,
+            range
+          );
+        } catch (err) {
+          errorCount += 1;
+          return null;
+        }
+      })
+    );
+    results.forEach((data) => {
+      if (!data) return;
+      const nextVisits = extractVisitList(data).visits;
+      nextVisits.forEach((visit) => accumulateVisitStats(statsMap, visit));
+    });
+  }
+
+  return {
+    statsMap,
+    totalPages,
+    recordCount,
+    capped: totalPages > maxPages,
+    errorCount,
+  };
+}
+
+async function getAllBusinessesPaged(days, options = {}) {
+  const pageSize = options.pageSize || ALL_BUSINESS_PAGE_SIZE;
+  const range = rangeFromDays(days, { end: options.rangeEnd });
+  const first = await getAllBusinesses(days, pageSize, 1, range);
+  const list = [...first.businesses];
+  const totalPages = Math.max(1, first.pageCount || 1);
+  const maxPages = Math.min(totalPages, options.maxPages || MAX_ALL_BUSINESS_PAGES);
+  let errorCount = 0;
+
+  for (let page = 2; page <= maxPages; page += 1) {
+    try {
+      const data = await getAllBusinesses(days, pageSize, page, range);
+      list.push(...data.businesses);
+    } catch (err) {
+      errorCount += 1;
+    }
+  }
+
+  return {
+    businesses: list,
+    totalPages,
+    recordCount: first.recordCount,
+    capped: totalPages > maxPages,
+    errorCount,
+  };
 }
 
 async function getVisitsByBusinessResponse(businessid, days, pageSize = 5, pageNo = 1) {
@@ -755,11 +838,19 @@ function updateReportsNote(reportCount) {
     const total = state.activityMeta.totalBusinesses || 0;
     const used = reportCount || state.activityMeta.reportCount || 0;
     const sampled = (total && used && used < total) || state.activityMeta.capped;
+    const flags = [];
     if (sampled) {
-      const rangeNote =
-        total && used ? `Top ${used} of ${total}` : "Sampled results";
+      flags.push(total && used ? `Top ${used} of ${total}` : "Sampled results");
+    }
+    const errors =
+      (state.activityMeta.visitErrors || 0) +
+      (state.activityMeta.businessErrors || 0);
+    if (errors) {
+      flags.push(`${errors} fetch issue${errors === 1 ? "" : "s"}`);
+    }
+    if (flags.length) {
       const suffix = state.activityMeta.capped ? " (sample)" : "";
-      note.textContent = `${label} | ${rangeNote}${suffix}`;
+      note.textContent = `${label} | ${flags.join(", ")}${suffix}`;
       return;
     }
   }
@@ -1680,44 +1771,18 @@ async function getBusinessesByIds(ids) {
 
 async function buildAllActivityBusinesses(days, options = {}) {
   const allowLongRange = !!options.allowLongRange;
-  const first = await getAllVisitsResponse(days, ALL_VISITS_PAGE_SIZE, 1, allowLongRange);
-  const { visits, pageCount } = extractVisitList(first);
-  const statsMap = new Map();
-  visits.forEach((visit) => accumulateVisitStats(statsMap, visit));
-
-  const totalPages = Math.max(1, pageCount || 1);
-  const maxPages = Math.min(totalPages, options.maxPages || MAX_ALL_VISIT_PAGES);
-  for (let page = 2; page <= maxPages; page += 1) {
-    const data = await getAllVisitsResponse(
-      days,
-      ALL_VISITS_PAGE_SIZE,
-      page,
-      allowLongRange
-    );
-    const nextVisits = extractVisitList(data).visits;
-    nextVisits.forEach((visit) => accumulateVisitStats(statsMap, visit));
-  }
-
-  const statsList = Array.from(statsMap.values()).sort((a, b) => b.visits - a.visits);
-  const defaultLimit = Math.min(MAX_ACTIVITY_COMPANIES, Math.max(getPageSize(), 25));
-  const listLimit = Math.min(options.limit || defaultLimit, statsList.length);
-  const baseReportLimit = options.reportLimit
-    ? Math.max(options.reportLimit, listLimit)
-    : Math.max(listLimit, REPORT_COMPANY_LIMIT);
-  const reportLimit = Math.min(baseReportLimit, statsList.length);
-  const reportStats = statsList.slice(0, reportLimit);
-  const ids = reportStats.map((stat) => String(stat.businessid));
-  const detailsMap = await getBusinessesByIds(ids);
-
-  const reportBusinesses = reportStats.map((stat) => {
-    const detail =
-      detailsMap.get(String(stat.businessid)) || {
-        BusinessID: stat.businessid,
-        Name: `Business ${stat.businessid}`,
-      };
-    return applyVisitStats(detail, stat);
+  const includeBusinesses = options.includeBusinesses !== false;
+  const rangeEnd = options.rangeEnd || new Date();
+  const visitStats = await collectAllVisitStats(days, {
+    allowLongRange,
+    maxPages: options.maxPages || MAX_ALL_VISIT_PAGES,
+    pageSize: options.pageSize || ALL_VISITS_PAGE_SIZE,
+    rangeEnd,
   });
-  const businesses = reportBusinesses.slice(0, listLimit);
+
+  const statsList = Array.from(visitStats.statsMap.values()).sort(
+    (a, b) => b.visits - a.visits
+  );
 
   const summary = statsList.reduce(
     (acc, stat) => {
@@ -1729,12 +1794,92 @@ async function buildAllActivityBusinesses(days, options = {}) {
     { newCount: 0, totalVisits: 0, returningCount: 0 }
   );
 
+  if (!includeBusinesses) {
+    const defaultLimit = Math.min(MAX_ACTIVITY_COMPANIES, Math.max(getPageSize(), 25));
+    const listLimit = Math.min(options.limit || defaultLimit, statsList.length);
+    const baseReportLimit = options.reportLimit
+      ? Math.max(options.reportLimit, listLimit)
+      : Math.max(listLimit, REPORT_COMPANY_LIMIT);
+    const reportLimit = Math.min(baseReportLimit, statsList.length);
+    const reportStats = statsList.slice(0, reportLimit);
+    const ids = reportStats.map((stat) => String(stat.businessid));
+    const detailsMap = await getBusinessesByIds(ids);
+
+    const reportBusinesses = reportStats.map((stat) => {
+      const detail =
+        detailsMap.get(String(stat.businessid)) || {
+          BusinessID: stat.businessid,
+          Name: `Business ${stat.businessid}`,
+        };
+      return applyVisitStats(detail, stat);
+    });
+    const businesses = reportBusinesses.slice(0, listLimit);
+
+    return {
+      businesses,
+      reportBusinesses,
+      capped: visitStats.capped || visitStats.errorCount > 0,
+      totalBusinesses: statsList.length,
+      summary,
+      visitErrors: visitStats.errorCount,
+    };
+  }
+
+  const businessResult = await getAllBusinessesPaged(days, {
+    pageSize: options.businessPageSize || ALL_BUSINESS_PAGE_SIZE,
+    maxPages: options.maxBusinessPages || MAX_ALL_BUSINESS_PAGES,
+    rangeEnd,
+  });
+
+  const businessMap = new Map();
+  businessResult.businesses.forEach((biz) => {
+    const id = getBusinessId(biz);
+    if (id) businessMap.set(String(id), biz);
+  });
+
+  const merged = businessResult.businesses.map((biz) => {
+    const id = String(getBusinessId(biz) || "");
+    const stats = visitStats.statsMap.get(id);
+    if (stats) return applyVisitStats(biz, stats);
+    return applyVisitStats(biz, {
+      businessid: id,
+      visits: 0,
+      pages: 0,
+      lastVisit: null,
+    });
+  });
+
+  const extras = statsList
+    .filter((stat) => !businessMap.has(String(stat.businessid)))
+    .map((stat) =>
+      applyVisitStats(
+        {
+          BusinessID: stat.businessid,
+          Name: `Business ${stat.businessid}`,
+        },
+        stat
+      )
+    );
+
+  const allBusinesses = merged.concat(extras);
+
+  const totalBusinesses = Math.max(
+    allBusinesses.length,
+    businessResult.recordCount || 0
+  );
+
   return {
-    businesses,
-    reportBusinesses,
-    capped: totalPages > MAX_ALL_VISIT_PAGES,
-    totalBusinesses: statsList.length,
+    businesses: allBusinesses,
+    reportBusinesses: allBusinesses,
+    capped:
+      visitStats.capped ||
+      businessResult.capped ||
+      visitStats.errorCount > 0 ||
+      businessResult.errorCount > 0,
+    totalBusinesses,
     summary,
+    visitErrors: visitStats.errorCount,
+    businessErrors: businessResult.errorCount,
   };
 }
 
@@ -1954,11 +2099,14 @@ async function loadLongRangeTopCompanies() {
   state.longRangeTopCompanies = { status: "loading", days: TOP_COMPANY_RANGE_DAYS };
 
   try {
+    const rangeEnd = new Date();
     const result = await buildAllActivityBusinesses(TOP_COMPANY_RANGE_DAYS, {
       limit: 8,
       reportLimit: 8,
       maxPages: MAX_ALL_VISIT_PAGES,
       allowLongRange: true,
+      includeBusinesses: false,
+      rangeEnd,
     });
     const list = buildTopCompanies(result.businesses, 5);
     state.longRangeTopCompanies = {
@@ -2321,11 +2469,15 @@ async function refresh() {
   setLoading(true);
   renderLoadingState();
   try {
+    const rangeEnd = new Date();
+    const rangeStart = new Date(
+      rangeEnd.getTime() - state.rangeDays * 24 * 60 * 60 * 1000
+    );
     let businesses = [];
     let summary = { newCount: 0, totalVisits: 0, returningCount: 0 };
     let capped = false;
     if (state.mode === "all") {
-      const result = await buildAllActivityBusinesses(state.rangeDays);
+      const result = await buildAllActivityBusinesses(state.rangeDays, { rangeEnd });
       businesses = result.businesses;
       capped = result.capped;
       summary = result.summary;
@@ -2334,6 +2486,8 @@ async function refresh() {
         totalBusinesses: result.totalBusinesses,
         capped: result.capped,
         reportCount: state.reportBusinesses.length,
+        visitErrors: result.visitErrors || 0,
+        businessErrors: result.businessErrors || 0,
       };
     } else {
       const pageSize = getPageSize();
@@ -2349,7 +2503,6 @@ async function refresh() {
     }
     state.businesses = businesses;
 
-    const rangeStart = getRangeStartDate(state.rangeDays);
     state.rangeStart = rangeStart;
 
     if (state.mode !== "all") {
@@ -2371,9 +2524,15 @@ async function refresh() {
       loadLongRangeTopCompanies().catch(() => {});
     }
     if (businesses.length) {
-      setStatus(capped ? "Updated (recent activity only)" : "Updated just now", capped ? "warn" : "good");
-    }
-    else setStatus("No activity in range", "warn");
+      const errorCount =
+        (state.activityMeta?.visitErrors || 0) +
+        (state.activityMeta?.businessErrors || 0);
+      if (errorCount) {
+        setStatus("Updated (partial data)", "warn");
+      } else {
+        setStatus(capped ? "Updated (recent activity only)" : "Updated just now", capped ? "warn" : "good");
+      }
+    } else setStatus("No activity in range", "warn");
   } catch (e) {
     console.error(e);
     setStatus("Failed to load data", "bad");
