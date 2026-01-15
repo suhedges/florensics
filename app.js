@@ -21,6 +21,7 @@ const MAX_ACTIVITY_COMPANIES = 60;
 const VISIT_SUMMARY_PAGE_SIZE = 1;
 const DETAILS_BATCH_SIZE = 6;
 const TOP_COMPANY_RANGE_DAYS = 365;
+const DEFAULT_HIDE_GENERIC = true;
 
 const state = {
   repCode: null,
@@ -45,7 +46,7 @@ const state = {
     minVisits: 0,
     sort: "visits",
     newOnly: false,
-    hideGeneric: false,
+    hideGeneric: DEFAULT_HIDE_GENERIC,
   },
 };
 
@@ -348,7 +349,7 @@ function filtersActive() {
     !!state.filters.query ||
     state.filters.minVisits > 0 ||
     state.filters.newOnly === true ||
-    state.filters.hideGeneric === true
+    state.filters.hideGeneric !== DEFAULT_HIDE_GENERIC
   );
 }
 
@@ -735,7 +736,7 @@ function applyFilterDefaults() {
     minVisits: 0,
     sort: "visits",
     newOnly: false,
-    hideGeneric: false,
+    hideGeneric: DEFAULT_HIDE_GENERIC,
   };
 }
 
@@ -751,7 +752,7 @@ function clearFilters() {
   if (sortSelect) sortSelect.value = "visits";
   if (minVisitsSelect) minVisitsSelect.value = "0";
   if (newOnlyToggle) newOnlyToggle.checked = false;
-  if (hideGenericToggle) hideGenericToggle.checked = false;
+  if (hideGenericToggle) hideGenericToggle.checked = DEFAULT_HIDE_GENERIC;
 
   updateActivityView();
 }
@@ -1117,7 +1118,7 @@ function renderVisitsList(container, visits) {
       const dateText = formatDateTime(getVisitDate(visit) || getVisitStartDate(visit));
       const pages = getVisitPages(visit);
       const referrer = formatReferrer(visit);
-      const ip = visit._ip ? `IP ${visit._ip}` : "";
+      const ip = visit._ip ? `IP ${visit._ip}` : isIpAllowed() ? "IP n/a" : "";
       const metaParts = [];
       if (pages) metaParts.push(`${pages} page${pages === 1 ? "" : "s"}`);
       if (referrer) metaParts.push(referrer);
@@ -1154,7 +1155,35 @@ function extractVisitIp(details, visit) {
   ];
   const fromDetails = pick(details || {}, keys, "");
   if (fromDetails) return fromDetails;
-  return pick(visit || {}, keys, "");
+  const fromVisit = pick(visit || {}, keys, "");
+  if (fromVisit) return fromVisit;
+  const deep = findIpValue(details || visit);
+  return deep || "";
+}
+
+function findIpValue(obj, depth = 0) {
+  if (!obj || depth > 4) return "";
+  if (typeof obj === "string") {
+    const match = obj.match(/(\d{1,3}\.){3}\d{1,3}|([a-fA-F0-9]{1,4}:){2,7}[a-fA-F0-9]{0,4}/);
+    return match ? match[0] : "";
+  }
+  if (typeof obj !== "object") return "";
+  if (Array.isArray(obj)) {
+    for (const item of obj) {
+      const found = findIpValue(item, depth + 1);
+      if (found) return found;
+    }
+    return "";
+  }
+  for (const [key, value] of Object.entries(obj)) {
+    if (typeof key === "string" && key.toLowerCase().includes("ip")) {
+      const direct = findIpValue(value, depth + 1);
+      if (direct) return direct;
+    }
+    const nested = findIpValue(value, depth + 1);
+    if (nested) return nested;
+  }
+  return "";
 }
 
 async function unlockIpAccess() {
