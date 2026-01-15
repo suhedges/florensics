@@ -15,6 +15,11 @@ const MAX_RANGE_DAYS = 30;
 const MAX_VISIT_LOOKUP = 6;
 const MAX_PAGE_RESULTS = 25;
 const PAGE_PAGE_SIZE = 10;
+const ALL_VISITS_PAGE_SIZE = 200;
+const MAX_ALL_VISIT_PAGES = 30;
+const MAX_ACTIVITY_COMPANIES = 60;
+const VISIT_SUMMARY_PAGE_SIZE = 1;
+const DETAILS_BATCH_SIZE = 6;
 
 const state = {
   repCode: null,
@@ -26,6 +31,8 @@ const state = {
   mode: "signed_out",
   assignedSource: "assigned",
   pagesCache: {},
+  visitsCache: {},
+  visitStatsCache: {},
   rangeStart: null,
   activeTab: "activity",
   filters: {
@@ -245,11 +252,15 @@ function getPageSize() {
 }
 
 function getBusinessName(business) {
-  return pick(business, ["BusinessName", "Name", "CompanyName", "Business"], "Unknown Company");
+  return pick(
+    business,
+    ["BusinessName", "Name", "CompanyName", "Business", "Company"],
+    "Unknown Company"
+  );
 }
 
 function getBusinessLocation(business) {
-  const city = pick(business, ["City", "Town", "LocationCity"], "");
+  const city = pick(business, ["City", "Town", "Locality", "LocationCity"], "");
   const stateProv = pick(business, ["State", "Region", "County", "StateProvince"], "");
   const country = pick(business, ["Country", "CountryName"], "");
   return [city, stateProv, country].filter(Boolean).join(", ");
@@ -266,6 +277,54 @@ function getBusinessSearchText(business) {
     .filter(Boolean)
     .join(" ")
     .toLowerCase();
+}
+
+function getBusinessIndustry(business) {
+  return pick(business, ["Industry", "IndustryName"], "");
+}
+
+function getBusinessWebsite(business) {
+  return pick(business, ["Website", "WebSite", "Url", "URL"], "");
+}
+
+function getBusinessPhone(business) {
+  return pick(business, ["Phone", "Telephone", "PhoneNumber"], "");
+}
+
+function getBusinessEmployees(business) {
+  return pick(
+    business,
+    ["EmployeeCount", "Employees", "NumberOfEmployees", "EmployeeNumber"],
+    ""
+  );
+}
+
+function getBusinessAddress(business) {
+  return [
+    pick(business, ["Address1", "AddressLine1"], ""),
+    pick(business, ["Address2", "AddressLine2"], ""),
+    pick(business, ["Address3", "AddressLine3"], ""),
+    pick(business, ["City", "Town", "Locality"], ""),
+    pick(business, ["State", "Region", "County", "StateProvince"], ""),
+    pick(business, ["Postcode", "Zip"], ""),
+    pick(business, ["Country", "CountryName"], ""),
+  ]
+    .filter(Boolean)
+    .join(", ");
+}
+
+function buildCompanyInfo(business) {
+  return {
+    name: getBusinessName(business),
+    industry: getBusinessIndustry(business),
+    website: getBusinessWebsite(business),
+    phone: getBusinessPhone(business),
+    employees: getBusinessEmployees(business),
+    address: getBusinessAddress(business),
+    lastVisit: getLastVisitDate(business),
+    visits: getVisitCount(business),
+    pages: getPageCount(business),
+  };
 }
 
 function filtersActive() {
@@ -461,22 +520,40 @@ async function getBusiness(businessid) {
   return lfFetch("/WebApi_v2/Business/GetBusiness", { businessid });
 }
 
-async function getVisitsByBusiness(businessid, days, pageSize = 5, pageNo = 1) {
+function extractVisitList(data) {
+  const primary = asArray(data);
+  const list = primary.length
+    ? primary
+    : asArray(pick(data, ["SiteVisitList", "VisitList", "Visits", "Results"], [])) || [];
+  const pageCount = toNumber(pick(data, ["PageCount", "pagecount"], 0));
+  const recordCount = toNumber(pick(data, ["RecordCount", "recordcount"], list.length));
+  return { visits: list, pageCount, recordCount };
+}
+
+async function getAllVisitsResponse(days, pageSize = ALL_VISITS_PAGE_SIZE, pageNo = 1) {
   const { datefrom, dateto } = rangeFromDays(days);
-  const data = await lfFetch("/WebApi_v2/Visit/GetVisitsByBusiness", {
+  return lfFetch("/WebApi_v2/Visit/GetAllVisits", {
+    datefrom,
+    dateto,
+    pagesize: pageSize,
+    pageno: pageNo,
+  });
+}
+
+async function getVisitsByBusinessResponse(businessid, days, pageSize = 5, pageNo = 1) {
+  const { datefrom, dateto } = rangeFromDays(days);
+  return lfFetch("/WebApi_v2/Visit/GetVisitsByBusiness", {
     businessid,
     datefrom,
     dateto,
     pagesize: pageSize,
     pageno: pageNo,
   });
+}
 
-  const primary = asArray(data);
-  const list = primary.length
-    ? primary
-    : asArray(pick(data, ["SiteVisitList", "VisitList", "Visits", "Results"], [])) || [];
-
-  return list;
+async function getVisitsByBusiness(businessid, days, pageSize = 5, pageNo = 1) {
+  const data = await getVisitsByBusinessResponse(businessid, days, pageSize, pageNo);
+  return extractVisitList(data).visits;
 }
 
 async function getPagesByVisit(visitid, pageSize = PAGE_PAGE_SIZE, pageNo = 1) {
@@ -659,16 +736,39 @@ function getDaysFromRangeValue(value) {
 }
 
 function getVisitCount(business) {
-  return toNumber(pick(business, ["NumberOfVisits", "VisitCount", "Visits", "TotalVisits"], 0));
+  return toNumber(
+    pick(
+      business,
+      ["NumberOfVisits", "VisitCount", "Visits", "TotalVisits", "RecordCount"],
+      0
+    )
+  );
 }
 
 function getPageCount(business) {
-  return toNumber(pick(business, ["PageViews", "PagesViewed", "TotalPageViews"], 0));
+  return toNumber(
+    pick(
+      business,
+      ["PageViews", "PagesViewed", "TotalPageViews", "TotalPages", "PageCount"],
+      0
+    )
+  );
 }
 
 function getLastVisitDate(business) {
   return parseDate(
-    pick(business, ["LastVisitDate", "MostRecentVisitDate", "LastVisited", "VisitDate"], "")
+    pick(
+      business,
+      [
+        "LastVisitDate",
+        "MostRecentVisitDate",
+        "LastVisited",
+        "VisitDate",
+        "StartDateTime",
+        "EndDateTime",
+      ],
+      ""
+    )
   );
 }
 
@@ -688,6 +788,17 @@ function formatShortDate(value) {
   const dt = parseDate(value);
   if (!dt) return String(value || "");
   return dt.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+function formatDateTime(value) {
+  const dt = parseDate(value);
+  if (!dt) return String(value || "");
+  return dt.toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
 }
 
 function isNewBusiness(business, rangeStart) {
@@ -722,13 +833,10 @@ function updateTiles({ newCount, totalVisits, returningCount }) {
 function activityRow(business) {
   const name = getBusinessName(business);
   const loc = getBusinessLocation(business);
+  const info = buildCompanyInfo(business);
 
-  const lastVisitRaw = pick(
-    business,
-    ["LastVisitDate", "MostRecentVisitDate", "LastVisited", "VisitDate"],
-    ""
-  );
-  const lastVisit = formatShortDate(lastVisitRaw);
+  const lastVisitDate = getLastVisitDate(business);
+  const lastVisit = lastVisitDate ? formatShortDate(lastVisitDate) : "";
   const visits = getVisitCount(business);
   const pages = getPageCount(business);
 
@@ -745,9 +853,28 @@ function activityRow(business) {
   const id = pick(business, ["BusinessID", "BusinessId", "ID", "Id"], "");
   const isNew = state.rangeStart ? isNewBusiness(business, state.rangeStart) : false;
   const tag = isNew ? `<span class="tag">New</span>` : "";
+  const detailItems = [];
+  if (info.industry) detailItems.push(`Industry: ${info.industry}`);
+  if (info.website) detailItems.push(`Website: ${info.website}`);
+  if (info.phone) detailItems.push(`Phone: ${info.phone}`);
+  if (info.employees) detailItems.push(`Employees: ${info.employees}`);
+  const detailHtml = detailItems.length
+    ? detailItems
+        .slice(0, 3)
+        .map((item) => `<span class="detail-item">${escapeHtml(item)}</span>`)
+        .join("")
+    : `<span class="detail-item muted">Details unavailable</span>`;
+  const copyText = buildCompanyCopyText(info);
+  const copyAttr = copyText ? escapeAttr(encodeCopyText(copyText)) : "";
+  const copyButton = copyText
+    ? `<button class="copy-btn" type="button" data-copy="${copyAttr}">Copy info</button>`
+    : "";
+  const detailsAttr = copyText
+    ? `data-copy="${copyAttr}" title="Click to copy"`
+    : "";
 
   return `
-    <button class="row" type="button" data-bizid="${escapeAttr(String(id || ""))}">
+    <div class="row" role="listitem" data-bizid="${escapeAttr(String(id || ""))}">
       <div class="badge">
         <svg viewBox="0 0 24 24" aria-hidden="true">
           <path d="M3 21h18v-2H3v2zm2-4h14V3H5v14zm2-2V5h10v10H7z"></path>
@@ -756,14 +883,20 @@ function activityRow(business) {
       <div class="row-main">
         <div class="row-top">
           <div class="company-wrap">
-            <div class="company" title="${escapeAttr(name)}">${escapeHtml(name)}</div>
+            <button class="company-btn" type="button" data-bizid="${escapeAttr(
+              String(id || "")
+            )}" title="View activity">${escapeHtml(name)}</button>
             ${tag}
           </div>
           <div class="meta">${escapeHtml(meta)}</div>
         </div>
         <div class="row-bot">${escapeHtml(summary)}</div>
+        <div class="row-details" ${detailsAttr}>
+          ${detailHtml}
+          ${copyButton}
+        </div>
       </div>
-    </button>
+    </div>
   `;
 }
 
@@ -789,18 +922,61 @@ function getVisitId(visit) {
 
 function getVisitDate(visit) {
   return parseDate(
-    pick(visit, ["VisitDate", "VisitStartDate", "DateVisited", "StartDate"], "")
+    pick(
+      visit,
+      ["VisitDate", "VisitStartDate", "DateVisited", "StartDate", "StartDateTime"],
+      ""
+    )
   );
 }
 
 function extractPageUrl(page) {
   return String(
-    pick(page, ["PageUrl", "PageURL", "Url", "URL", "Page", "PageName", "Location"], "")
+    pick(
+      page,
+      [
+        "PageUrl",
+        "PageURL",
+        "PageLocation",
+        "Url",
+        "URL",
+        "Page",
+        "PageName",
+        "Location",
+      ],
+      ""
+    )
   ).trim();
 }
 
 function extractPageTitle(page) {
   return String(pick(page, ["PageTitle", "Title", "Name"], "")).trim();
+}
+
+function getPageVisitDate(page) {
+  return parseDate(
+    pick(page, ["PageVisitDateTime", "PageVisitDate", "VisitDate", "DateVisited"], "")
+  );
+}
+
+function attachPageDurations(pages, visit) {
+  if (!pages.length) return pages;
+  const sorted = [...pages].sort((a, b) => {
+    const ad = getPageVisitDate(a)?.getTime() || 0;
+    const bd = getPageVisitDate(b)?.getTime() || 0;
+    return ad - bd;
+  });
+  const visitEnd = getVisitEndDate(visit);
+  for (let i = 0; i < sorted.length; i += 1) {
+    const start = getPageVisitDate(sorted[i]);
+    const next = sorted[i + 1] ? getPageVisitDate(sorted[i + 1]) : visitEnd;
+    if (start && next && next > start) {
+      sorted[i]._durationSeconds = Math.max(0, Math.round((next - start) / 1000));
+    } else {
+      sorted[i]._durationSeconds = 0;
+    }
+  }
+  return sorted;
 }
 
 function parseDurationSeconds(value) {
@@ -825,6 +1001,7 @@ function parseDurationSeconds(value) {
 }
 
 function getPageDurationSeconds(page) {
+  if (Number.isFinite(page?._durationSeconds)) return page._durationSeconds;
   const raw = pick(
     page,
     [
@@ -881,6 +1058,47 @@ function renderPagesList(container, pages) {
   container.innerHTML = rows;
 }
 
+function formatReferrer(visit) {
+  const name = pick(visit, ["ReferrerName", "Referrer"], "");
+  if (name) return String(name);
+  const link = pick(visit, ["ReferrerLink", "ReferrerURL", "ReferrerUrl"], "");
+  if (!link) return "";
+  try {
+    const url = new URL(link);
+    return url.hostname.replace(/^www\./i, "");
+  } catch {
+    return String(link);
+  }
+}
+
+function renderVisitsList(container, visits) {
+  if (!container) return;
+  if (!visits.length) {
+    container.innerHTML = `<div class="empty">No visits in this range.</div>`;
+    return;
+  }
+
+  const rows = visits
+    .map((visit) => {
+      const dateText = formatDateTime(getVisitDate(visit) || getVisitStartDate(visit));
+      const pages = getVisitPages(visit);
+      const referrer = formatReferrer(visit);
+      const metaParts = [];
+      if (pages) metaParts.push(`${pages} page${pages === 1 ? "" : "s"}`);
+      if (referrer) metaParts.push(referrer);
+      const meta = metaParts.join(" • ");
+      return `
+        <div class="visit-item">
+          <div class="visit-date">${escapeHtml(dateText)}</div>
+          <div class="visit-meta">${escapeHtml(meta)}</div>
+        </div>
+      `;
+    })
+    .join("");
+
+  container.innerHTML = rows;
+}
+
 function aggregatePages(pages) {
   const map = new Map();
   for (const page of pages) {
@@ -906,6 +1124,182 @@ function aggregatePages(pages) {
     }))
     .sort((a, b) => b.count - a.count)
     .slice(0, MAX_PAGE_RESULTS);
+}
+
+function getVisitStartDate(visit) {
+  return parseDate(
+    pick(visit, ["StartDateTime", "StartDate", "VisitDate", "DateVisited"], "")
+  );
+}
+
+function getVisitEndDate(visit) {
+  return parseDate(
+    pick(visit, ["EndDateTime", "EndDate", "VisitEndDate", "EndDateDateTime"], "")
+  );
+}
+
+function getVisitPages(visit) {
+  return toNumber(pick(visit, ["Pages", "PageCount", "PageViews"], 0));
+}
+
+function getVisitBusinessId(visit) {
+  return pick(visit, ["BusinessID", "BusinessId", "ID", "Id"], "");
+}
+
+function accumulateVisitStats(map, visit) {
+  const businessid = getVisitBusinessId(visit);
+  if (!businessid) return;
+  const entry = map.get(businessid) || {
+    businessid: String(businessid),
+    visits: 0,
+    pages: 0,
+    lastVisit: null,
+  };
+  entry.visits += 1;
+  entry.pages += getVisitPages(visit);
+  const visitDate = getVisitStartDate(visit) || getVisitEndDate(visit);
+  if (visitDate && (!entry.lastVisit || visitDate > entry.lastVisit)) {
+    entry.lastVisit = visitDate;
+  }
+  map.set(entry.businessid, entry);
+}
+
+function applyVisitStats(business, stats) {
+  if (!stats) return business;
+  const lastVisit = stats.lastVisit ? stats.lastVisit.toISOString() : "";
+  return {
+    ...business,
+    BusinessID: business.BusinessID || stats.businessid,
+    NumberOfVisits: stats.visits,
+    PageViews: stats.pages,
+    LastVisitDate: lastVisit,
+  };
+}
+
+function hasActivityFields(business) {
+  if (!business || typeof business !== "object") return false;
+  const keys = [
+    "NumberOfVisits",
+    "VisitCount",
+    "Visits",
+    "TotalVisits",
+    "LastVisitDate",
+    "MostRecentVisitDate",
+    "LastVisited",
+    "VisitDate",
+    "PageViews",
+    "PagesViewed",
+    "TotalPageViews",
+  ];
+  return keys.some((key) => business[key] !== undefined);
+}
+
+async function getVisitSummary(businessid, days) {
+  const cached = state.visitStatsCache?.[businessid];
+  if (cached) return cached;
+
+  const data = await getVisitsByBusinessResponse(
+    businessid,
+    days,
+    VISIT_SUMMARY_PAGE_SIZE,
+    1
+  );
+  const { visits, recordCount } = extractVisitList(data);
+  const latest = visits[0] ? getVisitStartDate(visits[0]) || getVisitEndDate(visits[0]) : null;
+  const summary = {
+    businessid: String(businessid),
+    visits: recordCount,
+    pages: 0,
+    lastVisit: latest,
+  };
+  if (!state.visitStatsCache) state.visitStatsCache = {};
+  state.visitStatsCache[summary.businessid] = summary;
+  return summary;
+}
+
+async function hydrateBusinessesWithVisitStats(businesses, days) {
+  const missing = businesses.filter((biz) => {
+    const id = pick(biz, ["BusinessID", "BusinessId", "ID", "Id"], "");
+    return id && !hasActivityFields(biz);
+  });
+  if (!missing.length) return businesses;
+
+  for (const biz of missing) {
+    const id = pick(biz, ["BusinessID", "BusinessId", "ID", "Id"], "");
+    if (!id) continue;
+    try {
+      const stats = await getVisitSummary(String(id), days);
+      Object.assign(biz, applyVisitStats(biz, stats));
+    } catch (e) {
+      console.error(e);
+    }
+  }
+  return businesses;
+}
+
+async function getBusinessesByIds(ids) {
+  const results = new Map();
+  for (let i = 0; i < ids.length; i += DETAILS_BATCH_SIZE) {
+    const slice = ids.slice(i, i + DETAILS_BATCH_SIZE);
+    const details = await Promise.all(
+      slice.map((id) => getBusiness(id).catch(() => null))
+    );
+    details.forEach((detail, idx) => {
+      if (detail) results.set(String(slice[idx]), detail);
+    });
+  }
+  return results;
+}
+
+async function buildAllActivityBusinesses(days) {
+  const first = await getAllVisitsResponse(days, ALL_VISITS_PAGE_SIZE, 1);
+  const { visits, pageCount } = extractVisitList(first);
+  const statsMap = new Map();
+  visits.forEach((visit) => accumulateVisitStats(statsMap, visit));
+
+  const totalPages = Math.max(1, pageCount || 1);
+  const maxPages = Math.min(totalPages, MAX_ALL_VISIT_PAGES);
+  for (let page = 2; page <= maxPages; page += 1) {
+    const data = await getAllVisitsResponse(days, ALL_VISITS_PAGE_SIZE, page);
+    const nextVisits = extractVisitList(data).visits;
+    nextVisits.forEach((visit) => accumulateVisitStats(statsMap, visit));
+  }
+
+  const statsList = Array.from(statsMap.values()).sort((a, b) => b.visits - a.visits);
+  const limit = Math.min(
+    MAX_ACTIVITY_COMPANIES,
+    Math.max(getPageSize(), 25),
+    statsList.length
+  );
+  const topStats = statsList.slice(0, limit);
+  const ids = topStats.map((stat) => String(stat.businessid));
+  const detailsMap = await getBusinessesByIds(ids);
+
+  const businesses = topStats.map((stat) => {
+    const detail =
+      detailsMap.get(String(stat.businessid)) || {
+        BusinessID: stat.businessid,
+        Name: `Business ${stat.businessid}`,
+      };
+    return applyVisitStats(detail, stat);
+  });
+
+  const summary = statsList.reduce(
+    (acc, stat) => {
+      acc.totalVisits += stat.visits;
+      if (stat.visits > 1) acc.returningCount += 1;
+      if (stat.visits <= 1) acc.newCount += 1;
+      return acc;
+    },
+    { newCount: 0, totalVisits: 0, returningCount: 0 }
+  );
+
+  return {
+    businesses,
+    capped: totalPages > MAX_ALL_VISIT_PAGES,
+    totalBusinesses: statsList.length,
+    summary,
+  };
 }
 
 function formatNumber(value) {
@@ -1126,6 +1520,9 @@ async function togglePagesForBusiness(businessid) {
       .map((visit) => getVisitId(visit))
       .filter(Boolean)
       .slice(0, MAX_VISIT_LOOKUP);
+    const visitMap = new Map(
+      sortedVisits.map((visit) => [String(getVisitId(visit)), visit])
+    );
 
     if (!visitIds.length) {
       wrap.innerHTML = `<div class="empty">No visit details found in this range.</div>`;
@@ -1135,7 +1532,8 @@ async function togglePagesForBusiness(businessid) {
     const pageResults = [];
     for (const visitId of visitIds) {
       const pages = await getPagesByVisit(visitId, PAGE_PAGE_SIZE, 1);
-      pageResults.push(...pages);
+      const withDuration = attachPageDurations(pages, visitMap.get(String(visitId)));
+      pageResults.push(...withDuration);
       if (pageResults.length >= MAX_PAGE_RESULTS * 2) break;
     }
 
@@ -1145,6 +1543,50 @@ async function togglePagesForBusiness(businessid) {
   } catch (e) {
     console.error(e);
     wrap.innerHTML = `<div class="empty">Could not load page visits.</div>`;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function toggleVisitsForBusiness(businessid) {
+  const btn = $("#btnLoadVisits");
+  const wrap = $("#visitsList");
+  if (!btn || !wrap) return;
+
+  const isOpen = wrap.dataset.state === "open";
+  if (isOpen) {
+    wrap.dataset.state = "closed";
+    wrap.innerHTML = "";
+    btn.textContent = "Show recent visits";
+    return;
+  }
+
+  wrap.dataset.state = "open";
+  btn.textContent = "Hide recent visits";
+  btn.disabled = true;
+
+  const cached = state.visitsCache[businessid];
+  if (cached) {
+    renderVisitsList(wrap, cached);
+    btn.disabled = false;
+    return;
+  }
+
+  wrap.innerHTML = `<div class="empty">Loading visits...</div>`;
+
+  try {
+    const visits = await getVisitsByBusiness(businessid, state.rangeDays, 10, 1);
+    const sorted = [...visits].sort((a, b) => {
+      const ad = getVisitDate(a)?.getTime() || 0;
+      const bd = getVisitDate(b)?.getTime() || 0;
+      return bd - ad;
+    });
+    const trimmed = sorted.slice(0, 10);
+    state.visitsCache[businessid] = trimmed;
+    renderVisitsList(wrap, trimmed);
+  } catch (e) {
+    console.error(e);
+    wrap.innerHTML = `<div class="empty">Could not load visit history.</div>`;
   } finally {
     btn.disabled = false;
   }
@@ -1188,10 +1630,16 @@ function buildCompanyCopyText(info) {
   if (info.phone) lines.push(`Phone: ${info.phone}`);
   if (info.employees) lines.push(`Employees: ${info.employees}`);
   if (info.address) lines.push(`Address: ${info.address}`);
-  if (info.lastVisit) lines.push(`Last visit: ${info.lastVisit}`);
-  if (info.visits) lines.push(`Visits: ${info.visits}`);
-  if (info.pages) lines.push(`Pages: ${info.pages}`);
+  if (info.lastVisit) lines.push(`Last visit: ${formatCopyDate(info.lastVisit)}`);
+  if (info.visits) lines.push(`Visits: ${formatNumber(info.visits)}`);
+  if (info.pages) lines.push(`Pages: ${formatNumber(info.pages)}`);
   return lines.join("\n");
+}
+
+function formatCopyDate(value) {
+  const dt = parseDate(value);
+  if (!dt) return String(value || "");
+  return dt.toLocaleString();
 }
 
 async function copyToClipboard(text, button) {
@@ -1231,106 +1679,65 @@ async function copyToClipboard(text, button) {
   }
 }
 
-async function openBusinessModal(businessid) {
-  openModal("Loading...", `<div class="empty">Fetching company details...</div>`);
+function encodeCopyText(text) {
+  return encodeURIComponent(text || "");
+}
 
+function decodeCopyText(text) {
   try {
-    const details = await getBusiness(businessid);
-    const name = pick(details, ["BusinessName", "Name", "CompanyName"], "Company");
-    const website = pick(details, ["Website", "WebSite", "Url", "URL"], "");
-    const phone = pick(details, ["Phone", "Telephone", "PhoneNumber"], "");
-    const industry = pick(details, ["Industry", "IndustryName"], "");
-    const lastVisit = pick(details, ["LastVisitDate", "MostRecentVisitDate", "VisitDate"], "");
-    const employees = pick(details, ["EmployeeCount", "Employees", "NumberOfEmployees"], "");
-    const address = [
-      pick(details, ["Address1", "AddressLine1"], ""),
-      pick(details, ["Address2", "AddressLine2"], ""),
-      pick(details, ["City"], ""),
-      pick(details, ["State", "Region"], ""),
-      pick(details, ["Postcode", "Zip"], ""),
-      pick(details, ["Country"], ""),
-    ]
-      .filter(Boolean)
-      .join(", ");
+    return decodeURIComponent(text || "");
+  } catch {
+    return text || "";
+  }
+}
 
-    setText("#modalTitle", name);
+async function openBusinessModal(businessid) {
+  const match = state.businesses.find(
+    (item) => String(pick(item, ["BusinessID", "BusinessId", "ID", "Id"], "")) === String(businessid)
+  );
+  let business = match;
 
-    const rows = [];
-    if (industry) rows.push(kvRow("Industry", escapeHtml(industry)));
-    if (website) rows.push(kvRow("Website", linkHtml(website)));
-    if (phone) rows.push(kvRow("Phone", escapeHtml(phone)));
-    if (employees) rows.push(kvRow("Employees", escapeHtml(String(employees))));
-    if (address) rows.push(kvRow("Address", escapeHtml(address)));
-    if (lastVisit) rows.push(kvRow("Last visit", escapeHtml(String(lastVisit))));
-
-    const fallbackBusiness = state.businesses.find(
-      (item) => String(pick(item, ["BusinessID", "BusinessId", "ID", "Id"], "")) === String(businessid)
-    );
-    const visits = getVisitCount(details) || getVisitCount(fallbackBusiness);
-    const pages = getPageCount(details) || getPageCount(fallbackBusiness);
-    const pills = [];
-    if (visits) pills.push(`<span class="pill">${escapeHtml(String(visits))}V</span>`);
-    if (pages) pills.push(`<span class="pill">${escapeHtml(String(pages))}P</span>`);
-
-    const copyText = buildCompanyCopyText({
-      name,
-      industry,
-      website,
-      phone,
-      employees,
-      address,
-      lastVisit,
-      visits,
-      pages,
-    });
-    const copyButton = copyText
-      ? `<div class="modal-actions"><button class="secondary-btn small" id="btnCopyCompany" type="button">Copy info</button></div>`
-      : "";
-
-    const pagesSection = `
-      <div class="pages">
-        <button class="secondary-btn small" id="btnLoadPages" type="button" data-bizid="${escapeAttr(
-          String(businessid || "")
-        )}">Show visited pages</button>
-        <div class="pages-list" id="pagesList" data-state="closed"></div>
-      </div>
-    `;
-
-    const detailsHtml = rows.length
-      ? `<div class="kv">${rows.join("")}</div>`
-      : `<div class="empty">No details available.</div>`;
-    const bodyHtml = `${detailsHtml}${pills.length ? `<div class="pills">${pills.join("")}</div>` : ""}${copyButton}${pagesSection}`;
-
-    const body = $("#modalBody");
-    if (body) body.innerHTML = bodyHtml;
-
-    const btn = $("#btnLoadPages");
-    if (btn) {
-      btn.addEventListener("click", () => togglePagesForBusiness(String(businessid || "")));
-    }
-    const copyBtn = $("#btnCopyCompany");
-    if (copyBtn) {
-      copyBtn.addEventListener("click", () => copyToClipboard(copyText, copyBtn));
-    }
-  } catch (e) {
-    setText("#modalTitle", "Details");
-    const body = $("#modalBody");
-    if (body) {
-      body.innerHTML = `
-        <div class="empty">Could not load details.</div>
-        <div class="pages">
-          <button class="secondary-btn small" id="btnLoadPages" type="button" data-bizid="${escapeAttr(
-            String(businessid || "")
-          )}">Show visited pages</button>
-          <div class="pages-list" id="pagesList" data-state="closed"></div>
-        </div>
-      `;
-      const btn = $("#btnLoadPages");
-      if (btn) {
-        btn.addEventListener("click", () => togglePagesForBusiness(String(businessid || "")));
-      }
+  if (!business) {
+    openModal("Loading...", `<div class="empty">Fetching company details...</div>`);
+    try {
+      business = await getBusiness(businessid);
+    } catch (e) {
+      console.error(e);
     }
   }
+
+  const name = business ? getBusinessName(business) : "Company activity";
+  const visits = business ? getVisitCount(business) : 0;
+  const pages = business ? getPageCount(business) : 0;
+  const lastVisit = business ? getLastVisitDate(business) : null;
+
+  const summaryItems = [];
+  summaryItems.push(`<div class="summary-item"><span>Visits</span><strong>${escapeHtml(formatNumber(visits))}</strong></div>`);
+  if (pages) {
+    summaryItems.push(`<div class="summary-item"><span>Pages</span><strong>${escapeHtml(formatNumber(pages))}</strong></div>`);
+  }
+  if (lastVisit) {
+    summaryItems.push(`<div class="summary-item"><span>Last visit</span><strong>${escapeHtml(formatDateTime(lastVisit))}</strong></div>`);
+  }
+
+  const bodyHtml = `
+    <div class="modal-summary">${summaryItems.join("")}</div>
+    <div class="modal-actions">
+      <button class="secondary-btn small" id="btnLoadPages" type="button" data-bizid="${escapeAttr(
+        String(businessid || "")
+      )}">Show visited pages</button>
+      <button class="secondary-btn small" id="btnLoadVisits" type="button" data-bizid="${escapeAttr(
+        String(businessid || "")
+      )}">Show recent visits</button>
+    </div>
+    <div class="pages-list" id="pagesList" data-state="closed"></div>
+    <div class="visits-list" id="visitsList" data-state="closed"></div>
+  `;
+
+  openModal(name, bodyHtml);
+
+  $("#btnLoadPages")?.addEventListener("click", () => togglePagesForBusiness(String(businessid || "")));
+  $("#btnLoadVisits")?.addEventListener("click", () => toggleVisitsForBusiness(String(businessid || "")));
 }
 
 // ---------- auth / sign-in ----------
@@ -1372,6 +1779,8 @@ function clearSession() {
   state.clientUserId = null;
   state.businesses = [];
   state.pagesCache = {};
+  state.visitsCache = {};
+  state.visitStatsCache = {};
   state.rangeStart = null;
 }
 
@@ -1383,30 +1792,47 @@ async function refresh() {
   state.rangeDays = clampRangeDays(state.rangeDays);
   setLoading(true);
   try {
-    const pageSize = getPageSize();
-    const businesses =
-      state.mode === "all"
-        ? await getAllBusinesses(state.rangeDays, pageSize, 1)
-        : await getBusinessesByAssignedTo(state.clientUserId, state.rangeDays, pageSize, 1);
+    let businesses = [];
+    let summary = { newCount: 0, totalVisits: 0, returningCount: 0 };
+    let capped = false;
+    if (state.mode === "all") {
+      const result = await buildAllActivityBusinesses(state.rangeDays);
+      businesses = result.businesses;
+      capped = result.capped;
+      summary = result.summary;
+    } else {
+      const pageSize = getPageSize();
+      const assigned = await getBusinessesByAssignedTo(
+        state.clientUserId,
+        state.rangeDays,
+        pageSize,
+        1
+      );
+      businesses = await hydrateBusinessesWithVisitStats(assigned, state.rangeDays);
+    }
     state.businesses = businesses;
 
     const rangeStart = getRangeStartDate(state.rangeDays);
     state.rangeStart = rangeStart;
 
-    const summary = businesses.reduce(
-      (acc, business) => {
-        const visits = getVisitCount(business);
-        acc.totalVisits += visits;
-        if (visits > 1) acc.returningCount += 1;
-        if (isNewBusiness(business, rangeStart)) acc.newCount += 1;
-        return acc;
-      },
-      { newCount: 0, totalVisits: 0, returningCount: 0 }
-    );
+    if (state.mode !== "all") {
+      summary = businesses.reduce(
+        (acc, business) => {
+          const visits = getVisitCount(business);
+          acc.totalVisits += visits;
+          if (visits > 1) acc.returningCount += 1;
+          if (isNewBusiness(business, rangeStart)) acc.newCount += 1;
+          return acc;
+        },
+        { newCount: 0, totalVisits: 0, returningCount: 0 }
+      );
+    }
 
     updateTiles(summary);
     updateActivityView();
-    if (businesses.length) setStatus("Updated just now", "good");
+    if (businesses.length) {
+      setStatus(capped ? "Updated (recent activity only)" : "Updated just now", capped ? "warn" : "good");
+    }
     else setStatus("No activity in range", "warn");
   } catch (e) {
     console.error(e);
@@ -1464,6 +1890,8 @@ function onSignOut() {
   if (state.mode === "all") {
     renderSignedOut();
     state.pagesCache = {};
+    state.visitsCache = {};
+    state.visitStatsCache = {};
     state.businesses = [];
     const wrap = $("#activityList");
     if (wrap) wrap.innerHTML = "";
@@ -1475,6 +1903,8 @@ function onSignOut() {
   }
   clearSession();
   state.pagesCache = {};
+  state.visitsCache = {};
+  state.visitStatsCache = {};
   state.businesses = [];
   renderSignedOut();
   const wrap = $("#activityList");
@@ -1491,6 +1921,8 @@ function onRangeChange() {
   const days = clampRangeDays(getDaysFromRangeValue(select.value));
   state.rangeDays = days;
   state.pagesCache = {};
+  state.visitsCache = {};
+  state.visitStatsCache = {};
   if (state.mode === "assigned") saveSession();
   else localStorage.setItem("lf_rangeDays", String(state.rangeDays || DEFAULT_RANGE_DAYS));
   refresh().catch(() => {});
@@ -1504,6 +1936,8 @@ async function onExplore() {
     state.repName = null;
     state.businesses = [];
     state.pagesCache = {};
+    state.visitsCache = {};
+    state.visitStatsCache = {};
     renderExplore();
     await refresh();
   } catch (e) {
@@ -1616,9 +2050,23 @@ function boot() {
   });
 
   $("#activityList")?.addEventListener("click", (e) => {
-    const row = e.target.closest(".row");
-    if (!row) return;
-    const bizId = row.getAttribute("data-bizid");
+    const copyBtn = e.target.closest(".copy-btn");
+    if (copyBtn) {
+      const payload = decodeCopyText(copyBtn.getAttribute("data-copy") || "");
+      copyToClipboard(payload, copyBtn);
+      return;
+    }
+
+    const details = e.target.closest(".row-details");
+    if (details && details.getAttribute("data-copy")) {
+      const payload = decodeCopyText(details.getAttribute("data-copy") || "");
+      copyToClipboard(payload);
+      return;
+    }
+
+    const companyBtn = e.target.closest(".company-btn");
+    if (!companyBtn) return;
+    const bizId = companyBtn.getAttribute("data-bizid");
     if (!bizId) return;
     openBusinessModal(bizId);
   });
