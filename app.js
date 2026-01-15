@@ -20,6 +20,7 @@ const MAX_ALL_VISIT_PAGES = 30;
 const MAX_ACTIVITY_COMPANIES = 60;
 const VISIT_SUMMARY_PAGE_SIZE = 1;
 const DETAILS_BATCH_SIZE = 6;
+const TOP_COMPANY_RANGE_DAYS = 365;
 
 const state = {
   repCode: null,
@@ -33,6 +34,10 @@ const state = {
   pagesCache: {},
   visitsCache: {},
   visitStatsCache: {},
+  visitDetailsCache: {},
+  ipUnlocked: false,
+  activeBusinessId: null,
+  longRangeTopCompanies: null,
   rangeStart: null,
   activeTab: "activity",
   filters: {
@@ -40,6 +45,7 @@ const state = {
     minVisits: 0,
     sort: "visits",
     newOnly: false,
+    hideGeneric: false,
   },
 };
 
@@ -129,8 +135,10 @@ function clampRangeDays(days) {
   return Math.min(Math.max(Math.round(num), 1), MAX_RANGE_DAYS);
 }
 
-function rangeFromDays(days) {
-  const safeDays = clampRangeDays(days);
+function rangeFromDays(days, options = {}) {
+  const safeDays = options.allowLongRange
+    ? Math.max(1, Math.round(Number(days) || DEFAULT_RANGE_DAYS))
+    : clampRangeDays(days);
   const end = new Date();
   const start = new Date();
   start.setDate(end.getDate() - safeDays);
@@ -259,6 +267,13 @@ function getBusinessName(business) {
   );
 }
 
+function isGenericBusinessName(name) {
+  const clean = String(name || "").trim();
+  if (!clean) return true;
+  if (/^Business\s+\d+$/i.test(clean)) return true;
+  return clean.toLowerCase() === "unknown company";
+}
+
 function getBusinessLocation(business) {
   const city = pick(business, ["City", "Town", "Locality", "LocationCity"], "");
   const stateProv = pick(business, ["State", "Region", "County", "StateProvince"], "");
@@ -272,6 +287,7 @@ function getBusinessSearchText(business) {
     getBusinessLocation(business),
     pick(business, ["Industry", "IndustryName"], ""),
     pick(business, ["Website", "WebSite", "Url", "URL"], ""),
+    getBusinessAddress(business),
   ];
   return parts
     .filter(Boolean)
@@ -331,7 +347,8 @@ function filtersActive() {
   return (
     !!state.filters.query ||
     state.filters.minVisits > 0 ||
-    state.filters.newOnly === true
+    state.filters.newOnly === true ||
+    state.filters.hideGeneric === true
   );
 }
 
@@ -340,9 +357,11 @@ function getFilteredBusinesses(list) {
   const query = String(state.filters.query || "").trim().toLowerCase();
   const minVisits = Number(state.filters.minVisits || 0);
   const requireNew = !!state.filters.newOnly;
+  const hideGeneric = !!state.filters.hideGeneric;
   const rangeStart = state.rangeStart || getRangeStartDate(state.rangeDays);
 
   return list.filter((business) => {
+    if (hideGeneric && isGenericBusinessName(getBusinessName(business))) return false;
     if (minVisits && getVisitCount(business) < minVisits) return false;
     if (requireNew && !isNewBusiness(business, rangeStart)) return false;
     if (query) {
@@ -530,8 +549,13 @@ function extractVisitList(data) {
   return { visits: list, pageCount, recordCount };
 }
 
-async function getAllVisitsResponse(days, pageSize = ALL_VISITS_PAGE_SIZE, pageNo = 1) {
-  const { datefrom, dateto } = rangeFromDays(days);
+async function getAllVisitsResponse(
+  days,
+  pageSize = ALL_VISITS_PAGE_SIZE,
+  pageNo = 1,
+  allowLongRange = false
+) {
+  const { datefrom, dateto } = rangeFromDays(days, { allowLongRange });
   return lfFetch("/WebApi_v2/Visit/GetAllVisits", {
     datefrom,
     dateto,
@@ -569,6 +593,10 @@ async function getPagesByVisit(visitid, pageSize = PAGE_PAGE_SIZE, pageNo = 1) {
     : asArray(pick(data, ["PageVisitList", "Pages", "PageList", "Results"], [])) || [];
 
   return list;
+}
+
+async function getVisitDetails(visitid) {
+  return lfFetch("/WebApi_v2/Visit/GetVisitDetails", { visitid });
 }
 
 // ---------- UI rendering ----------
@@ -691,12 +719,14 @@ function syncFiltersFromUI() {
   const sortSelect = $("#sortSelect");
   const minVisitsSelect = $("#minVisitsSelect");
   const newOnlyToggle = $("#newOnlyToggle");
+  const hideGenericToggle = $("#hideGenericToggle");
 
   state.filters.query = searchInput ? searchInput.value.trim() : "";
   state.filters.sort = sortSelect ? sortSelect.value : "visits";
   const minVisits = minVisitsSelect ? Number(minVisitsSelect.value || 0) : 0;
   state.filters.minVisits = Number.isFinite(minVisits) ? minVisits : 0;
   state.filters.newOnly = newOnlyToggle ? newOnlyToggle.checked : false;
+  state.filters.hideGeneric = hideGenericToggle ? hideGenericToggle.checked : false;
 }
 
 function applyFilterDefaults() {
@@ -705,6 +735,7 @@ function applyFilterDefaults() {
     minVisits: 0,
     sort: "visits",
     newOnly: false,
+    hideGeneric: false,
   };
 }
 
@@ -714,11 +745,13 @@ function clearFilters() {
   const sortSelect = $("#sortSelect");
   const minVisitsSelect = $("#minVisitsSelect");
   const newOnlyToggle = $("#newOnlyToggle");
+  const hideGenericToggle = $("#hideGenericToggle");
 
   if (searchInput) searchInput.value = "";
   if (sortSelect) sortSelect.value = "visits";
   if (minVisitsSelect) minVisitsSelect.value = "0";
   if (newOnlyToggle) newOnlyToggle.checked = false;
+  if (hideGenericToggle) hideGenericToggle.checked = false;
 
   updateActivityView();
 }
@@ -858,9 +891,10 @@ function activityRow(business) {
   if (info.website) detailItems.push(`Website: ${info.website}`);
   if (info.phone) detailItems.push(`Phone: ${info.phone}`);
   if (info.employees) detailItems.push(`Employees: ${info.employees}`);
+  if (info.address) detailItems.push(`Address: ${info.address}`);
   const detailHtml = detailItems.length
     ? detailItems
-        .slice(0, 3)
+        .slice(0, 4)
         .map((item) => `<span class="detail-item">${escapeHtml(item)}</span>`)
         .join("")
     : `<span class="detail-item muted">Details unavailable</span>`;
@@ -1083,9 +1117,11 @@ function renderVisitsList(container, visits) {
       const dateText = formatDateTime(getVisitDate(visit) || getVisitStartDate(visit));
       const pages = getVisitPages(visit);
       const referrer = formatReferrer(visit);
+      const ip = visit._ip ? `IP ${visit._ip}` : "";
       const metaParts = [];
       if (pages) metaParts.push(`${pages} page${pages === 1 ? "" : "s"}`);
       if (referrer) metaParts.push(referrer);
+      if (ip) metaParts.push(ip);
       const meta = metaParts.join(" • ");
       return `
         <div class="visit-item">
@@ -1097,6 +1133,79 @@ function renderVisitsList(container, visits) {
     .join("");
 
   container.innerHTML = rows;
+}
+
+function isIpAllowed() {
+  return state.mode !== "all" || state.ipUnlocked;
+}
+
+function extractVisitIp(details, visit) {
+  const keys = [
+    "IPAddress",
+    "IpAddress",
+    "IP",
+    "Ip",
+    "IPAddressV4",
+    "IPV4",
+    "IPAddressV6",
+    "IPV6",
+    "VisitorIP",
+    "VisitorIp",
+  ];
+  const fromDetails = pick(details || {}, keys, "");
+  if (fromDetails) return fromDetails;
+  return pick(visit || {}, keys, "");
+}
+
+async function unlockIpAccess() {
+  const input = $("#ipPassword");
+  const value = input ? input.value.trim() : "";
+  if (value !== "secret123") {
+    setStatus("Incorrect IP password", "bad");
+    if (input) {
+      input.value = "";
+      input.focus();
+    }
+    return;
+  }
+  state.ipUnlocked = true;
+  setStatus("IP access enabled", "good");
+  const gate = $("#ipGate");
+  if (gate) gate.outerHTML = `<div class="ip-gate ok" id="ipGate">IP access enabled</div>`;
+
+  const bizId = state.activeBusinessId;
+  const wrap = $("#visitsList");
+  if (bizId && wrap && wrap.dataset.state === "open") {
+    const cached = state.visitsCache[bizId];
+    if (cached) {
+      await enrichVisitsWithIps(cached);
+      renderVisitsList(wrap, cached);
+    }
+  }
+}
+
+async function enrichVisitsWithIps(visits) {
+  if (!visits.length) return visits;
+  for (const visit of visits) {
+    if (visit._ip) continue;
+    const visitId = getVisitId(visit);
+    if (!visitId) continue;
+    const cached = state.visitDetailsCache[String(visitId)];
+    if (cached) {
+      const ip = extractVisitIp(cached, visit);
+      if (ip) visit._ip = ip;
+      continue;
+    }
+    try {
+      const details = await getVisitDetails(visitId);
+      state.visitDetailsCache[String(visitId)] = details;
+      const ip = extractVisitIp(details, visit);
+      if (ip) visit._ip = ip;
+    } catch (e) {
+      console.error(e);
+    }
+  }
+  return visits;
 }
 
 function aggregatePages(pages) {
@@ -1251,26 +1360,29 @@ async function getBusinessesByIds(ids) {
   return results;
 }
 
-async function buildAllActivityBusinesses(days) {
-  const first = await getAllVisitsResponse(days, ALL_VISITS_PAGE_SIZE, 1);
+async function buildAllActivityBusinesses(days, options = {}) {
+  const allowLongRange = !!options.allowLongRange;
+  const first = await getAllVisitsResponse(days, ALL_VISITS_PAGE_SIZE, 1, allowLongRange);
   const { visits, pageCount } = extractVisitList(first);
   const statsMap = new Map();
   visits.forEach((visit) => accumulateVisitStats(statsMap, visit));
 
   const totalPages = Math.max(1, pageCount || 1);
-  const maxPages = Math.min(totalPages, MAX_ALL_VISIT_PAGES);
+  const maxPages = Math.min(totalPages, options.maxPages || MAX_ALL_VISIT_PAGES);
   for (let page = 2; page <= maxPages; page += 1) {
-    const data = await getAllVisitsResponse(days, ALL_VISITS_PAGE_SIZE, page);
+    const data = await getAllVisitsResponse(
+      days,
+      ALL_VISITS_PAGE_SIZE,
+      page,
+      allowLongRange
+    );
     const nextVisits = extractVisitList(data).visits;
     nextVisits.forEach((visit) => accumulateVisitStats(statsMap, visit));
   }
 
   const statsList = Array.from(statsMap.values()).sort((a, b) => b.visits - a.visits);
-  const limit = Math.min(
-    MAX_ACTIVITY_COMPANIES,
-    Math.max(getPageSize(), 25),
-    statsList.length
-  );
+  const defaultLimit = Math.min(MAX_ACTIVITY_COMPANIES, Math.max(getPageSize(), 25));
+  const limit = Math.min(options.limit || defaultLimit, statsList.length);
   const topStats = statsList.slice(0, limit);
   const ids = topStats.map((stat) => String(stat.businessid));
   const detailsMap = await getBusinessesByIds(ids);
@@ -1451,8 +1563,22 @@ function renderReports(list) {
     return;
   }
 
-  const topCompanies = buildTopCompanies(list, 5);
-  const recency = buildRecencyBuckets(list);
+  const allowLongRange = state.mode === "all" && !filtersActive();
+  const longRangeStatus = allowLongRange
+    ? state.longRangeTopCompanies?.status
+    : null;
+  const longRange =
+    allowLongRange &&
+    state.longRangeTopCompanies &&
+    state.longRangeTopCompanies.status === "ready"
+      ? state.longRangeTopCompanies
+      : null;
+  const topCompanies =
+    longRangeStatus === "loading"
+      ? []
+      : longRange
+      ? longRange.list
+      : buildTopCompanies(list, 5);
   const locations = buildTopGroups(
     list,
     (business) => pick(business, ["Country", "CountryName"], "Unknown"),
@@ -1468,9 +1594,14 @@ function renderReports(list) {
     (item) => String(item.label || "").toLowerCase() !== "unknown"
   );
 
+  const topCompaniesSubtitle =
+    longRangeStatus === "loading"
+      ? "Loading 12-month view..."
+      : longRange
+      ? `By visits (last 12 mo${longRange.capped ? ", sample" : ""})`
+      : "By visits";
   const cards = [
-    renderBarCard("Top companies", "By visits", topCompanies),
-    renderBarCard("Visit recency", "Companies by last touch", recency),
+    renderBarCard("Top companies", topCompaniesSubtitle, topCompanies),
     renderBarCard("Top locations", "By visits", locations),
   ];
 
@@ -1481,6 +1612,40 @@ function renderReports(list) {
   }
 
   grid.innerHTML = cards.join("");
+}
+
+async function loadLongRangeTopCompanies() {
+  if (state.mode !== "all") return;
+  if (
+    state.longRangeTopCompanies &&
+    state.longRangeTopCompanies.status === "ready" &&
+    state.longRangeTopCompanies.days === TOP_COMPANY_RANGE_DAYS
+  ) {
+    return;
+  }
+  if (state.longRangeTopCompanies?.status === "loading") return;
+  state.longRangeTopCompanies = { status: "loading", days: TOP_COMPANY_RANGE_DAYS };
+
+  try {
+    const result = await buildAllActivityBusinesses(TOP_COMPANY_RANGE_DAYS, {
+      limit: 8,
+      maxPages: MAX_ALL_VISIT_PAGES,
+      allowLongRange: true,
+    });
+    const list = buildTopCompanies(result.businesses, 5);
+    state.longRangeTopCompanies = {
+      status: "ready",
+      days: TOP_COMPANY_RANGE_DAYS,
+      capped: result.capped,
+      list,
+    };
+  } catch (e) {
+    console.error(e);
+    state.longRangeTopCompanies = { status: "error", days: TOP_COMPANY_RANGE_DAYS };
+  }
+
+  const filtered = sortBusinesses(getFilteredBusinesses(state.businesses));
+  renderReports(filtered);
 }
 
 async function togglePagesForBusiness(businessid) {
@@ -1567,6 +1732,9 @@ async function toggleVisitsForBusiness(businessid) {
 
   const cached = state.visitsCache[businessid];
   if (cached) {
+    if (isIpAllowed()) {
+      await enrichVisitsWithIps(cached);
+    }
     renderVisitsList(wrap, cached);
     btn.disabled = false;
     return;
@@ -1583,6 +1751,9 @@ async function toggleVisitsForBusiness(businessid) {
     });
     const trimmed = sorted.slice(0, 10);
     state.visitsCache[businessid] = trimmed;
+    if (isIpAllowed()) {
+      await enrichVisitsWithIps(trimmed);
+    }
     renderVisitsList(wrap, trimmed);
   } catch (e) {
     console.error(e);
@@ -1606,6 +1777,7 @@ function closeModal() {
   hide("#overlay");
   const overlay = $("#overlay");
   if (overlay) overlay.setAttribute("aria-hidden", "true");
+  state.activeBusinessId = null;
 }
 
 function kvRow(label, valueHtml) {
@@ -1692,6 +1864,7 @@ function decodeCopyText(text) {
 }
 
 async function openBusinessModal(businessid) {
+  state.activeBusinessId = String(businessid || "");
   const match = state.businesses.find(
     (item) => String(pick(item, ["BusinessID", "BusinessId", "ID", "Id"], "")) === String(businessid)
   );
@@ -1720,6 +1893,22 @@ async function openBusinessModal(businessid) {
     summaryItems.push(`<div class="summary-item"><span>Last visit</span><strong>${escapeHtml(formatDateTime(lastVisit))}</strong></div>`);
   }
 
+  const ipGateHtml =
+    state.mode === "all"
+      ? state.ipUnlocked
+        ? `<div class="ip-gate ok" id="ipGate">IP access enabled</div>`
+        : `
+          <div class="ip-gate" id="ipGate">
+            <label for="ipPassword">IP access password</label>
+            <div class="ip-row">
+              <input id="ipPassword" type="password" placeholder="Enter password" />
+              <button class="secondary-btn small" id="btnUnlockIp" type="button">Unlock IPs</button>
+            </div>
+            <div class="ip-hint">Required to reveal visitor IPs in All Activity.</div>
+          </div>
+        `
+      : "";
+
   const bodyHtml = `
     <div class="modal-summary">${summaryItems.join("")}</div>
     <div class="modal-actions">
@@ -1730,6 +1919,7 @@ async function openBusinessModal(businessid) {
         String(businessid || "")
       )}">Show recent visits</button>
     </div>
+    ${ipGateHtml}
     <div class="pages-list" id="pagesList" data-state="closed"></div>
     <div class="visits-list" id="visitsList" data-state="closed"></div>
   `;
@@ -1738,6 +1928,10 @@ async function openBusinessModal(businessid) {
 
   $("#btnLoadPages")?.addEventListener("click", () => togglePagesForBusiness(String(businessid || "")));
   $("#btnLoadVisits")?.addEventListener("click", () => toggleVisitsForBusiness(String(businessid || "")));
+  $("#btnUnlockIp")?.addEventListener("click", () => unlockIpAccess());
+  $("#ipPassword")?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") unlockIpAccess();
+  });
 }
 
 // ---------- auth / sign-in ----------
@@ -1781,6 +1975,9 @@ function clearSession() {
   state.pagesCache = {};
   state.visitsCache = {};
   state.visitStatsCache = {};
+  state.visitDetailsCache = {};
+  state.ipUnlocked = false;
+  state.longRangeTopCompanies = null;
   state.rangeStart = null;
 }
 
@@ -1830,6 +2027,9 @@ async function refresh() {
 
     updateTiles(summary);
     updateActivityView();
+    if (state.mode === "all") {
+      loadLongRangeTopCompanies().catch(() => {});
+    }
     if (businesses.length) {
       setStatus(capped ? "Updated (recent activity only)" : "Updated just now", capped ? "warn" : "good");
     }
@@ -1892,6 +2092,9 @@ function onSignOut() {
     state.pagesCache = {};
     state.visitsCache = {};
     state.visitStatsCache = {};
+    state.visitDetailsCache = {};
+    state.ipUnlocked = false;
+    state.longRangeTopCompanies = null;
     state.businesses = [];
     const wrap = $("#activityList");
     if (wrap) wrap.innerHTML = "";
@@ -1905,6 +2108,9 @@ function onSignOut() {
   state.pagesCache = {};
   state.visitsCache = {};
   state.visitStatsCache = {};
+  state.visitDetailsCache = {};
+  state.ipUnlocked = false;
+  state.longRangeTopCompanies = null;
   state.businesses = [];
   renderSignedOut();
   const wrap = $("#activityList");
@@ -1923,6 +2129,7 @@ function onRangeChange() {
   state.pagesCache = {};
   state.visitsCache = {};
   state.visitStatsCache = {};
+  state.visitDetailsCache = {};
   if (state.mode === "assigned") saveSession();
   else localStorage.setItem("lf_rangeDays", String(state.rangeDays || DEFAULT_RANGE_DAYS));
   refresh().catch(() => {});
@@ -1938,6 +2145,9 @@ async function onExplore() {
     state.pagesCache = {};
     state.visitsCache = {};
     state.visitStatsCache = {};
+    state.visitDetailsCache = {};
+    state.ipUnlocked = false;
+    state.longRangeTopCompanies = null;
     renderExplore();
     await refresh();
   } catch (e) {
@@ -2041,6 +2251,7 @@ function boot() {
   $("#sortSelect")?.addEventListener("change", onFiltersChange);
   $("#minVisitsSelect")?.addEventListener("change", onFiltersChange);
   $("#newOnlyToggle")?.addEventListener("change", onFiltersChange);
+  $("#hideGenericToggle")?.addEventListener("change", onFiltersChange);
   $("#btnClearFilters")?.addEventListener("click", clearFilters);
   $$(".tab").forEach((btn) => {
     btn.addEventListener("click", () => setActiveTab(btn.dataset.tab || "activity"));

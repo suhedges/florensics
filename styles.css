@@ -222,7 +222,7 @@ input[type="checkbox"]:checked::after{transform: scale(1);}
   display:flex;
   flex-direction:column;
   gap:6px;
-  align-items:flex-start;
+  align-items:center;
 }
 .preview-note{
   font-size:11px;
@@ -515,6 +515,10 @@ select{
   border:1px solid rgba(15,23,42,.12);
   color: var(--ink-mid);
   font-weight:700;
+  max-width:160px;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
 }
 .detail-item.muted{
   background: transparent;
@@ -643,6 +647,46 @@ select{
   font-size:12px;
   color: var(--ink-strong);
   font-weight:900;
+}
+.ip-gate{
+  margin:6px 0 8px;
+  padding:8px;
+  border-radius:12px;
+  border:1px dashed rgba(15,23,42,.2);
+  background: rgba(15,23,42,.03);
+  font-size:11px;
+  color: var(--muted2);
+  display:flex;
+  flex-direction:column;
+  gap:6px;
+}
+.ip-gate.ok{
+  border-style:solid;
+  background: rgba(17,136,95,.08);
+  color: var(--good);
+  font-weight:700;
+}
+.ip-row{
+  display:flex;
+  gap:6px;
+  align-items:center;
+}
+.ip-row input{
+  height:30px;
+  border-radius:10px;
+  border:1px solid rgba(15,23,42,.2);
+  background: rgba(255,255,255,.9);
+  color: var(--text);
+  font-weight:600;
+  letter-spacing:0;
+  text-transform:none;
+  text-align:left;
+  padding:0 8px;
+  flex:1;
+}
+.ip-hint{
+  font-size:10px;
+  color: var(--muted2);
 }
 .kv{
   display:grid;
