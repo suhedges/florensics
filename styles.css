@@ -30,11 +30,7 @@ html,body{height:100%; margin:0; background:transparent; font-family:var(--font)
   max-height:690px;
   box-sizing:border-box;
   color:var(--text);
-  background:
-    radial-gradient(140px 140px at 20% 10%, rgba(42,91,215,.16), transparent 60%),
-    radial-gradient(160px 160px at 85% 20%, rgba(17,136,95,.16), transparent 60%),
-    radial-gradient(180px 180px at 40% 95%, rgba(181,119,20,.12), transparent 60%),
-    linear-gradient(180deg, rgba(255,255,255,.98), rgba(245,247,252,.94));
+  background:transparent;
   border:1px solid var(--stroke);
   border-radius:var(--radius);
   overflow:hidden;
