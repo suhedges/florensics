@@ -10,6 +10,7 @@
 const WORKER_BASE = "https://leadforensics-proxy.sethh.workers.dev";
 
 const DEFAULT_RANGE_DAYS = 7;
+const LOGIN_LOOKBACK_DAYS = 30;
 
 const state = {
   repCode: null,
@@ -18,6 +19,8 @@ const state = {
   rangeDays: DEFAULT_RANGE_DAYS,
   assignedToCache: null,
   businesses: [],
+  mode: "signed_out",
+  assignedSource: "assigned",
 };
 
 // ---------- tiny DOM helpers ----------
@@ -48,13 +51,27 @@ function setStatus(message, tone = "") {
   setText("#statusText", message);
 }
 
+function setListTitle(text) {
+  setText("#listTitle", text);
+}
+
+function setSignOutLabel(mode) {
+  const btn = $("#btnSignOut");
+  if (!btn) return;
+  const label = mode === "all" ? "Back" : "Sign out";
+  btn.setAttribute("title", label);
+  btn.setAttribute("aria-label", label);
+}
+
 function setLoading(isLoading) {
   const refreshBtn = $("#btnRefresh");
   const signInBtn = $("#btnSignIn");
   const signOutBtn = $("#btnSignOut");
+  const exploreBtn = $("#btnExplore");
   if (refreshBtn) refreshBtn.disabled = !!isLoading;
   if (signInBtn) signInBtn.disabled = !!isLoading;
   if (signOutBtn) signOutBtn.disabled = !!isLoading;
+  if (exploreBtn) exploreBtn.disabled = !!isLoading;
   if (isLoading) setStatus("Loading...", "warn");
 }
 
@@ -158,6 +175,11 @@ async function lfFetch(path, params = {}) {
   }
 }
 
+function isNotFoundError(err) {
+  const msg = String(err?.message || err || "");
+  return msg.includes(" 404");
+}
+
 // ---------- response normalization ----------
 function asArray(maybeArray) {
   if (Array.isArray(maybeArray)) return maybeArray;
@@ -195,12 +217,30 @@ function getPageSize() {
 }
 
 // ---------- assigned users ----------
-async function getAssignedToList(pageSize = 200, pageNo = 1) {
-  if (state.assignedToCache) return state.assignedToCache;
-  const data = await lfFetch("/WebApi_v2/Reference/GetAssignedToList", {
+async function getClientPortalLogins(pageSize = 200, pageNo = 1, days = LOGIN_LOOKBACK_DAYS) {
+  const { datefrom, dateto } = rangeFromDays(days);
+  return lfFetch("/WebApi_v2/Reference/GetClientPortalLogins", {
+    datefrom,
+    dateto,
     pagesize: pageSize,
     pageno: pageNo,
   });
+}
+
+async function getAssignedToList(pageSize = 200, pageNo = 1) {
+  if (state.assignedToCache) return state.assignedToCache;
+  let data;
+  try {
+    data = await lfFetch("/WebApi_v2/Reference/GetAssignedToList", {
+      pagesize: pageSize,
+      pageno: pageNo,
+    });
+    state.assignedSource = "assigned";
+  } catch (err) {
+    if (!isNotFoundError(err)) throw err;
+    data = await getClientPortalLogins(pageSize, pageNo);
+    state.assignedSource = "logins";
+  }
   const arr = asArray(data);
   state.assignedToCache = arr;
   return arr;
@@ -221,11 +261,41 @@ function repCodeFromName(name) {
 
 function normalizeAssignedUser(user) {
   const name = String(
-    pick(user, ["ClientUserName", "AssignedTo", "Name", "UserName", "FullName"], "")
+    pick(
+      user,
+      [
+        "ClientUserName",
+        "AssignedTo",
+        "Name",
+        "UserName",
+        "FullName",
+        "ClientUser",
+        "User",
+        "LoginName",
+        "Email",
+      ],
+      ""
+    )
   ).trim();
-  const id = pick(user, ["ClientUserID", "ClientUserId", "AssignedToID", "UserId", "ID"], "");
+  const id = pick(
+    user,
+    [
+      "ClientUserID",
+      "ClientUserId",
+      "AssignedToID",
+      "UserId",
+      "UserID",
+      "ClientUserIdentity",
+      "ID",
+    ],
+    ""
+  );
   const code = String(
-    pick(user, ["RepCode", "UserCode", "Code", "Initials", "ShortCode"], "")
+    pick(
+      user,
+      ["RepCode", "UserCode", "Code", "Initials", "UserInitials", "ShortCode"],
+      ""
+    )
   ).trim();
 
   if (!name || !id) return null;
@@ -237,7 +307,14 @@ function normalizeAssignedUser(user) {
 }
 
 function getAssignedUsers(list) {
-  return list.map(normalizeAssignedUser).filter(Boolean);
+  const normalized = list.map(normalizeAssignedUser).filter(Boolean);
+  const unique = new Map();
+  for (const user of normalized) {
+    const key = user.id || user.name;
+    if (!key || unique.has(key)) continue;
+    unique.set(key, user);
+  }
+  return Array.from(unique.values());
 }
 
 function findAssignedUserByCode(users, code) {
@@ -246,6 +323,23 @@ function findAssignedUserByCode(users, code) {
 }
 
 // ---------- Lead Forensics calls ----------
+async function getAllBusinesses(days, pageSize = 25, pageNo = 1) {
+  const { datefrom, dateto } = rangeFromDays(days);
+  const data = await lfFetch("/WebApi_v2/Business/GetAllBusinesses", {
+    datefrom,
+    dateto,
+    pagesize: pageSize,
+    pageno: pageNo,
+  });
+
+  const primary = asArray(data);
+  const list = primary.length
+    ? primary
+    : asArray(pick(data, ["BusinessList", "Businesses", "Business", "Results"], [])) || [];
+
+  return list;
+}
+
 async function getBusinessesByAssignedTo(clientuserid, days, pageSize = 25, pageNo = 1) {
   const { datefrom, dateto } = rangeFromDays(days);
   const data = await lfFetch("/WebApi_v2/Business/GetBusinessesByAssignedTo", {
@@ -270,10 +364,12 @@ async function getBusiness(businessid) {
 
 // ---------- UI rendering ----------
 function renderSignedOut() {
+  state.mode = "signed_out";
   show("#signinPanel");
   hide("#dashPanel");
   const repPill = $("#repPill");
   if (repPill) repPill.innerHTML = "";
+  setListTitle("Assigned activity");
   const input = $("#repCode");
   if (input) input.value = "";
   const refreshBtn = $("#btnRefresh");
@@ -286,8 +382,23 @@ function renderSignedOut() {
 }
 
 function renderSignedIn() {
+  state.mode = "assigned";
   hide("#signinPanel");
   show("#dashPanel");
+  setListTitle("Assigned activity");
+  setSignOutLabel(state.mode);
+  renderRepPill();
+  setRangeSelect(state.rangeDays);
+  const refreshBtn = $("#btnRefresh");
+  if (refreshBtn) refreshBtn.disabled = false;
+}
+
+function renderExplore() {
+  state.mode = "all";
+  hide("#signinPanel");
+  show("#dashPanel");
+  setListTitle("All activity");
+  setSignOutLabel(state.mode);
   renderRepPill();
   setRangeSelect(state.rangeDays);
   const refreshBtn = $("#btnRefresh");
@@ -297,13 +408,14 @@ function renderSignedIn() {
 function renderRepPill() {
   const repPill = $("#repPill");
   if (!repPill) return;
+  const label = state.mode === "all" ? "All activity" : state.repName || "";
   repPill.innerHTML = `
     <span class="mini">
       <svg viewBox="0 0 24 24" aria-hidden="true">
         <path d="M12 12a4 4 0 1 0-4-4 4 4 0 0 0 4 4zm0 2c-3.33 0-8 1.67-8 5v1h16v-1c0-3.33-4.67-5-8-5z"></path>
       </svg>
     </span>
-    <span class="rep-name">${escapeHtml(state.repName || "")}</span>
+    <span class="rep-name">${escapeHtml(label)}</span>
   `;
 }
 
@@ -422,7 +534,8 @@ function renderActivityList(list) {
   if (!wrap) return;
 
   if (!list.length) {
-    wrap.innerHTML = `<div class="empty">No assigned activity in this range.</div>`;
+    const label = state.mode === "all" ? "No activity in this range." : "No assigned activity in this range.";
+    wrap.innerHTML = `<div class="empty">${label}</div>`;
     return;
   }
 
@@ -523,20 +636,25 @@ function loadSession() {
   const clientUserId = localStorage.getItem("lf_clientUserId");
   const rangeDays = parseInt(localStorage.getItem("lf_rangeDays") || "", 10);
 
+  if (Number.isFinite(rangeDays)) {
+    state.rangeDays = rangeDays;
+  }
+
   if (repCode && repName && clientUserId) {
     state.repCode = repCode;
     state.repName = repName;
     state.clientUserId = clientUserId;
-    state.rangeDays = Number.isFinite(rangeDays) ? rangeDays : DEFAULT_RANGE_DAYS;
     return true;
   }
   return false;
 }
 
 function saveSession() {
-  localStorage.setItem("lf_repCode", state.repCode || "");
-  localStorage.setItem("lf_repName", state.repName || "");
-  localStorage.setItem("lf_clientUserId", state.clientUserId || "");
+  if (state.repCode && state.repName && state.clientUserId) {
+    localStorage.setItem("lf_repCode", state.repCode);
+    localStorage.setItem("lf_repName", state.repName);
+    localStorage.setItem("lf_clientUserId", state.clientUserId);
+  }
   localStorage.setItem("lf_rangeDays", String(state.rangeDays || DEFAULT_RANGE_DAYS));
 }
 
@@ -553,17 +671,16 @@ function clearSession() {
 
 // ---------- main refresh ----------
 async function refresh() {
-  if (!state.clientUserId) return;
+  if (state.mode === "signed_out") return;
+  if (state.mode === "assigned" && !state.clientUserId) return;
 
   setLoading(true);
   try {
     const pageSize = getPageSize();
-    const businesses = await getBusinessesByAssignedTo(
-      state.clientUserId,
-      state.rangeDays,
-      pageSize,
-      1
-    );
+    const businesses =
+      state.mode === "all"
+        ? await getAllBusinesses(state.rangeDays, pageSize, 1)
+        : await getBusinessesByAssignedTo(state.clientUserId, state.rangeDays, pageSize, 1);
     state.businesses = businesses;
 
     const rangeStart = new Date();
@@ -606,6 +723,15 @@ async function onSignIn() {
   try {
     const assignedTo = await getAssignedToList();
     const users = getAssignedUsers(assignedTo);
+
+    if (!users.length) {
+      const msg =
+        state.assignedSource === "logins"
+          ? `No portal logins found in the last ${LOGIN_LOOKBACK_DAYS} days.`
+          : "No assigned users returned.";
+      notify(msg, "bad");
+      return;
+    }
     const match = findAssignedUserByCode(users, code);
 
     if (!match) {
@@ -629,6 +755,13 @@ async function onSignIn() {
 }
 
 function onSignOut() {
+  if (state.mode === "all") {
+    renderSignedOut();
+    const wrap = $("#activityList");
+    if (wrap) wrap.innerHTML = "";
+    setStatus("Ready", "good");
+    return;
+  }
   clearSession();
   renderSignedOut();
   const wrap = $("#activityList");
@@ -641,8 +774,26 @@ function onRangeChange() {
   if (!select) return;
   const days = getDaysFromRangeValue(select.value);
   state.rangeDays = days;
-  saveSession();
+  if (state.mode === "assigned") saveSession();
+  else localStorage.setItem("lf_rangeDays", String(state.rangeDays || DEFAULT_RANGE_DAYS));
   refresh().catch(() => {});
+}
+
+async function onExplore() {
+  setLoading(true);
+  try {
+    state.clientUserId = null;
+    state.repCode = null;
+    state.repName = null;
+    state.businesses = [];
+    renderExplore();
+    await refresh();
+  } catch (e) {
+    console.error(e);
+    notify(e.message || "Failed to load Lead Forensics data.", "bad");
+  } finally {
+    setLoading(false);
+  }
 }
 
 async function showCodesModal() {
@@ -663,9 +814,13 @@ async function showCodesModal() {
       )
       .join("");
 
+    const emptyMsg =
+      state.assignedSource === "logins"
+        ? `No portal logins found in the last ${LOGIN_LOOKBACK_DAYS} days.`
+        : "No assigned users returned.";
     const body = users.length
       ? `<div class="code-list">${rows}</div>`
-      : `<div class="empty">No assigned users returned.</div>`;
+      : `<div class="empty">${escapeHtml(emptyMsg)}</div>`;
     openModal("Rep codes", body);
   } catch (e) {
     console.error(e);
@@ -676,6 +831,16 @@ async function showCodesModal() {
 }
 
 function showAccountModal() {
+  if (state.mode === "all") {
+    const body = `
+      <div class="kv">
+        ${kvRow("Mode", escapeHtml("All activity"))}
+        ${kvRow("Range", escapeHtml(String(state.rangeDays)) + "d")}
+      </div>
+    `;
+    openModal("Account", body);
+    return;
+  }
   if (!state.repName || !state.repCode) return showCodesModal();
   const body = `
     <div class="kv">
@@ -712,6 +877,7 @@ function boot() {
   $("#repCode")?.addEventListener("keydown", (e) => {
     if (e.key === "Enter") onSignIn();
   });
+  $("#btnExplore")?.addEventListener("click", onExplore);
   $("#btnSignOut")?.addEventListener("click", onSignOut);
   $("#btnRefresh")?.addEventListener("click", refresh);
   $("#rangeSelect")?.addEventListener("change", onRangeChange);

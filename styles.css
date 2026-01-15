@@ -152,6 +152,20 @@ input:focus{border-color: rgba(42,91,215,.55); box-shadow: 0 0 0 4px rgba(42,91,
 .primary-btn:active{transform: translateY(1px);}
 .primary-btn:disabled{opacity:.6; cursor:not-allowed;}
 
+.secondary-btn{
+  height:34px;
+  padding:0 12px;
+  border-radius:12px;
+  border:1px solid rgba(15,23,42,.25);
+  background: rgba(15,23,42,.04);
+  color: var(--text);
+  font-weight:700;
+  cursor:pointer;
+  transition: background .15s ease, border-color .15s ease;
+}
+.secondary-btn:hover{background: rgba(15,23,42,.08); border-color: rgba(15,23,42,.35);}
+.secondary-btn:disabled{opacity:.6; cursor:not-allowed;}
+
 .hint{
   margin-top:10px;
   font-size:12px;
@@ -166,6 +180,18 @@ input:focus{border-color: rgba(42,91,215,.55); box-shadow: 0 0 0 4px rgba(42,91,
   font-weight:700;
   cursor:pointer;
   padding:0;
+}
+
+.preview{
+  margin-top:12px;
+  display:flex;
+  flex-direction:column;
+  gap:6px;
+  align-items:flex-start;
+}
+.preview-note{
+  font-size:11px;
+  color: var(--muted2);
 }
 
 .dash-top{
