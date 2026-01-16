@@ -9,17 +9,16 @@
 
 const WORKER_BASE = "https://leadforensics-proxy.sethh.workers.dev";
 
-const DEFAULT_RANGE_DAYS = 7;
+const DEFAULT_RANGE_DAYS = 1;
 const LOGIN_LOOKBACK_DAYS = 30;
 const MAX_RANGE_DAYS = 30;
 const MAX_VISIT_LOOKUP = 6;
 const MAX_PAGE_RESULTS = 25;
 const PAGE_PAGE_SIZE = 10;
-const ALL_VISITS_PAGE_SIZE = 20;
+const ALL_VISITS_PAGE_SIZE = 40;
 const MAX_ALL_VISIT_PAGES = 300;
 const ALL_BUSINESS_PAGE_SIZE = 100;
 const MAX_ALL_BUSINESS_PAGES = 120;
-const VISIT_FETCH_CONCURRENCY = 4;
 const REQUEST_GAP_MS = 150;
 const RATE_LIMIT_RETRIES = 4;
 const RATE_LIMIT_BASE_DELAY_MS = 800;
@@ -50,6 +49,7 @@ const state = {
   activeBusinessId: null,
   longRangeTopCompanies: null,
   isLoading: false,
+  rateLimited: false,
   activeTile: "visits",
   rangeStart: null,
   activeTab: "activity",
@@ -203,11 +203,12 @@ function parseDate(value) {
 
 // ---------- fetch wrapper ----------
 let requestQueue = Promise.resolve();
+let requestGapMs = REQUEST_GAP_MS;
 
 function enqueueRequest(task) {
   const run = requestQueue
     .then(() => task())
-    .finally(() => sleep(REQUEST_GAP_MS));
+    .finally(() => sleep(requestGapMs));
   requestQueue = run.catch(() => {});
   return run;
 }
@@ -236,6 +237,11 @@ async function lfFetch(path, params = {}) {
           5000
         );
         const waitMs = retryAfter > 0 ? retryAfter * 1000 : backoff;
+        requestGapMs = Math.min(Math.max(requestGapMs, 200) + 100, 1500);
+        if (state.isLoading && !state.rateLimited) {
+          state.rateLimited = true;
+          setStatus("Rate limit hit. Slowing down...", "warn");
+        }
         await sleep(waitMs);
         attempt += 1;
         continue;
@@ -302,6 +308,20 @@ function getPageSize() {
   if (h >= 600) return 50;
   if (h >= 420) return 35;
   return 25;
+}
+
+function getVisitPageSize(days) {
+  const safeDays = clampRangeDays(days);
+  if (safeDays <= 1) return 100;
+  if (safeDays <= 7) return 40;
+  return ALL_VISITS_PAGE_SIZE;
+}
+
+function getRequestGapForRange(days) {
+  const safeDays = clampRangeDays(days);
+  if (safeDays <= 1) return 120;
+  if (safeDays <= 7) return 160;
+  return 200;
 }
 
 function getBusinessName(business) {
@@ -631,8 +651,9 @@ async function getAllVisitsResponse(
 
 async function collectAllVisitStats(days, options = {}) {
   const allowLongRange = !!options.allowLongRange;
-  const pageSize = options.pageSize || ALL_VISITS_PAGE_SIZE;
+  const pageSize = options.pageSize || getVisitPageSize(days);
   const range = rangeFromDays(days, { allowLongRange, end: options.rangeEnd });
+  const onProgress = typeof options.onProgress === "function" ? options.onProgress : null;
   const first = await getAllVisitsResponse(days, pageSize, 1, allowLongRange, range);
   const { visits, pageCount, recordCount } = extractVisitList(first);
   const statsMap = new Map();
@@ -640,34 +661,29 @@ async function collectAllVisitStats(days, options = {}) {
 
   const totalPages = Math.max(1, pageCount || 1);
   const maxPages = Math.min(totalPages, options.maxPages || MAX_ALL_VISIT_PAGES);
-  const concurrency = Math.max(1, options.concurrency || VISIT_FETCH_CONCURRENCY);
-  const pages = [];
-  for (let page = 2; page <= maxPages; page += 1) pages.push(page);
-
   let errorCount = 0;
-  for (let i = 0; i < pages.length; i += concurrency) {
-    const batch = pages.slice(i, i + concurrency);
-    const results = await Promise.all(
-      batch.map(async (pageNo) => {
-        try {
-          return await getAllVisitsResponse(
-            days,
-            pageSize,
-            pageNo,
-            allowLongRange,
-            range
-          );
-        } catch (err) {
-          errorCount += 1;
-          return null;
-        }
-      })
-    );
-    results.forEach((data) => {
-      if (!data) return;
+
+  if (onProgress) {
+    onProgress({ page: 1, totalPages: maxPages, recordCount });
+  }
+
+  for (let page = 2; page <= maxPages; page += 1) {
+    if (onProgress && (page % 5 === 0 || page === maxPages)) {
+      onProgress({ page, totalPages: maxPages, recordCount });
+    }
+    try {
+      const data = await getAllVisitsResponse(
+        days,
+        pageSize,
+        page,
+        allowLongRange,
+        range
+      );
       const nextVisits = extractVisitList(data).visits;
       nextVisits.forEach((visit) => accumulateVisitStats(statsMap, visit));
-    });
+    } catch (err) {
+      errorCount += 1;
+    }
   }
 
   return {
@@ -1807,11 +1823,13 @@ async function buildAllActivityBusinesses(days, options = {}) {
   const allowLongRange = !!options.allowLongRange;
   const includeBusinesses = options.includeBusinesses !== false;
   const rangeEnd = options.rangeEnd || new Date();
+  const onProgress = typeof options.onProgress === "function" ? options.onProgress : null;
   const visitStats = await collectAllVisitStats(days, {
     allowLongRange,
     maxPages: options.maxPages || MAX_ALL_VISIT_PAGES,
     pageSize: options.pageSize || ALL_VISITS_PAGE_SIZE,
     rangeEnd,
+    onProgress,
   });
 
   const statsList = Array.from(visitStats.statsMap.values()).sort(
@@ -2500,6 +2518,8 @@ async function refresh() {
   if (state.mode === "assigned" && !state.clientUserId) return;
 
   state.rangeDays = clampRangeDays(state.rangeDays);
+  requestGapMs = getRequestGapForRange(state.rangeDays);
+  state.rateLimited = false;
   setLoading(true);
   renderLoadingState();
   try {
@@ -2511,7 +2531,19 @@ async function refresh() {
     let summary = { newCount: 0, totalVisits: 0, returningCount: 0 };
     let capped = false;
     if (state.mode === "all") {
-      const result = await buildAllActivityBusinesses(state.rangeDays, { rangeEnd });
+      const result = await buildAllActivityBusinesses(state.rangeDays, {
+        rangeEnd,
+        onProgress: (info) => {
+          if (!state.isLoading) return;
+          const total = info.totalPages || 0;
+          const page = info.page || 0;
+          if (total) {
+            setStatus(`Loading visits ${page}/${total}`, "warn");
+          } else {
+            setStatus("Loading visits...", "warn");
+          }
+        },
+      });
       businesses = result.businesses;
       capped = result.capped;
       summary = result.summary;
