@@ -10,8 +10,9 @@
 const WORKER_BASE = "https://leadforensics-proxy.sethh.workers.dev";
 
 const DEFAULT_RANGE_DAYS = 1;
+const MIN_RANGE_DAYS = 8 / 24;
 const LOGIN_LOOKBACK_DAYS = 30;
-const MAX_RANGE_DAYS = 30;
+const MAX_RANGE_DAYS = 2;
 const MAX_VISIT_LOOKUP = 6;
 const MAX_PAGE_RESULTS = 25;
 const PAGE_PAGE_SIZE = 10;
@@ -28,6 +29,7 @@ const DETAILS_BATCH_SIZE = 6;
 const REPORT_COMPANY_LIMIT = 120;
 const TOP_COMPANY_RANGE_DAYS = 365;
 const DEFAULT_HIDE_GENERIC = true;
+const RECENT_VISIT_LIMIT = 10;
 
 const state = {
   repCode: null,
@@ -37,6 +39,7 @@ const state = {
   assignedToCache: null,
   businesses: [],
   reportBusinesses: [],
+  recentVisits: [],
   activityMeta: null,
   mode: "signed_out",
   assignedSource: "assigned",
@@ -53,6 +56,7 @@ const state = {
   activeTile: "visits",
   rangeStart: null,
   activeTab: "activity",
+  showRecentVisits: false,
   filters: {
     query: "",
     minVisits: 0,
@@ -152,7 +156,7 @@ function lfDateTime(d) {
 function clampRangeDays(days) {
   const num = Number(days);
   if (!Number.isFinite(num)) return DEFAULT_RANGE_DAYS;
-  return Math.min(Math.max(Math.round(num), 1), MAX_RANGE_DAYS);
+  return Math.min(Math.max(num, MIN_RANGE_DAYS), MAX_RANGE_DAYS);
 }
 
 function rangeFromDays(days, options = {}) {
@@ -311,17 +315,16 @@ function getPageSize() {
 }
 
 function getVisitPageSize(days) {
-  const safeDays = clampRangeDays(days);
-  if (safeDays <= 1) return 100;
-  if (safeDays <= 7) return 40;
-  return ALL_VISITS_PAGE_SIZE;
+  const safeHours = clampRangeDays(days) * 24;
+  if (safeHours <= 24) return 100;
+  return 60;
 }
 
 function getRequestGapForRange(days) {
-  const safeDays = clampRangeDays(days);
-  if (safeDays <= 1) return 120;
-  if (safeDays <= 7) return 160;
-  return 200;
+  const safeHours = clampRangeDays(days) * 24;
+  if (safeHours <= 12) return 120;
+  if (safeHours <= 24) return 140;
+  return 160;
 }
 
 function getBusinessName(business) {
@@ -658,6 +661,15 @@ async function collectAllVisitStats(days, options = {}) {
   const { visits, pageCount, recordCount } = extractVisitList(first);
   const statsMap = new Map();
   visits.forEach((visit) => accumulateVisitStats(statsMap, visit));
+  const recentLimit = options.recentLimit || RECENT_VISIT_LIMIT * 3;
+  const recentVisits = visits
+    .slice()
+    .sort((a, b) => {
+      const ad = getVisitTimestamp(a)?.getTime() || 0;
+      const bd = getVisitTimestamp(b)?.getTime() || 0;
+      return bd - ad;
+    })
+    .slice(0, recentLimit);
 
   const totalPages = Math.max(1, pageCount || 1);
   const maxPages = Math.min(totalPages, options.maxPages || MAX_ALL_VISIT_PAGES);
@@ -692,6 +704,7 @@ async function collectAllVisitStats(days, options = {}) {
     recordCount,
     capped: totalPages > maxPages,
     errorCount,
+    recentVisits,
   };
 }
 
@@ -760,6 +773,8 @@ async function getVisitDetails(visitid) {
 // ---------- UI rendering ----------
 function renderSignedOut() {
   state.mode = "signed_out";
+  state.showRecentVisits = false;
+  state.recentVisits = [];
   show("#signinPanel");
   hide("#dashPanel");
   hide("#repPill");
@@ -786,6 +801,7 @@ function renderSignedOut() {
 
 function renderSignedIn() {
   state.mode = "assigned";
+  state.showRecentVisits = false;
   hide("#signinPanel");
   show("#dashPanel");
   show("#repPill");
@@ -806,6 +822,7 @@ function renderSignedIn() {
 
 function renderExplore() {
   state.mode = "all";
+  state.showRecentVisits = true;
   hide("#signinPanel");
   show("#dashPanel");
   show("#repPill");
@@ -861,23 +878,32 @@ function setActiveTab(tab) {
 function setRangeSelect(days) {
   const select = $("#rangeSelect");
   if (!select) return;
-  const safeDays = clampRangeDays(days);
-  if (safeDays <= 1) select.value = "24h";
-  else if (safeDays <= 7) select.value = "7d";
-  else select.value = "30d";
+  const safeHours = clampRangeDays(days) * 24;
+  if (safeHours <= 8) select.value = "8h";
+  else if (safeHours <= 12) select.value = "12h";
+  else if (safeHours <= 24) select.value = "24h";
+  else select.value = "48h";
 }
 
-function updateListCount(visibleCount, totalCount) {
+function formatRangeLabel(days) {
+  const safeHours = Math.round(clampRangeDays(days) * 24);
+  return `${safeHours}h`;
+}
+
+function updateListCount(visibleCount, totalCount, label = "company") {
   const el = $("#listCount");
   if (!el) return;
   if (!totalCount) {
     el.textContent = "";
     return;
   }
+  const plural =
+    label === "company" ? "companies" : label === "visit" ? "visits" : `${label}s`;
+  const unit = totalCount === 1 ? label : plural;
   el.textContent =
     visibleCount === totalCount
-      ? `${totalCount} companies`
-      : `${visibleCount} of ${totalCount}`;
+      ? `${totalCount} ${unit}`
+      : `${visibleCount} of ${totalCount} ${unit}`;
 }
 
 function updateReportsNote(reportCount) {
@@ -909,8 +935,20 @@ function updateReportsNote(reportCount) {
 
 function updateActivityView() {
   const filtered = sortBusinesses(getFilteredBusinesses(state.businesses));
-  renderActivityList(filtered);
-  updateListCount(filtered.length, state.businesses.length);
+  const showRecent = state.mode === "all" && state.showRecentVisits;
+
+  if (showRecent) {
+    const visits = getFilteredRecentVisits(state.recentVisits);
+    setListTitle("Recent visits");
+    renderRecentVisitsList(visits);
+    updateListCount(visits.length, visits.length, "visit");
+  } else {
+    const title = state.mode === "all" ? "All activity" : "Assigned activity";
+    setListTitle(title);
+    renderActivityList(filtered);
+    updateListCount(filtered.length, state.businesses.length);
+  }
+
   renderReports(filtered, state.reportBusinesses);
   updateFilterSummary();
   updateSortToggleLabel();
@@ -934,6 +972,9 @@ function updateFilterSummary() {
   const el = $("#filterSummary");
   if (!el) return;
   const bits = [];
+  if (state.mode === "all" && state.showRecentVisits) {
+    bits.push("Recent visits");
+  }
   if (state.activeTile === "new") {
     bits.push("New visits");
   } else if (state.activeTile === "returning") {
@@ -966,6 +1007,7 @@ function updateSortToggleLabel() {
 }
 
 function toggleSortMode() {
+  if (state.mode === "all") state.showRecentVisits = false;
   const current = state.filters.sort || "visits";
   const next = current === "visits" ? "pages" : current === "pages" ? "activity" : "visits";
   state.filters.sort = next;
@@ -973,6 +1015,7 @@ function toggleSortMode() {
 }
 
 function applyTileNew() {
+  if (state.mode === "all") state.showRecentVisits = false;
   state.filters.newOnly = true;
   state.filters.returningOnly = false;
   state.filters.minVisits = 0;
@@ -982,6 +1025,7 @@ function applyTileNew() {
 }
 
 function applyTileReturning() {
+  if (state.mode === "all") state.showRecentVisits = false;
   state.filters.newOnly = false;
   state.filters.returningOnly = true;
   state.filters.minVisits = 2;
@@ -991,6 +1035,7 @@ function applyTileReturning() {
 }
 
 function applyTileVisits() {
+  if (state.mode === "all") state.showRecentVisits = false;
   state.filters.newOnly = false;
   state.filters.returningOnly = false;
   state.filters.sort = "visits";
@@ -1072,19 +1117,22 @@ function clearFilters() {
   if (searchInput) searchInput.value = "";
   setActiveTile("visits");
   state.filters.sort = "visits";
+  if (state.mode === "all") state.showRecentVisits = true;
 
   updateActivityView();
 }
 
 function onFiltersChange() {
   syncFiltersFromUI();
+  if (state.mode === "all") state.showRecentVisits = false;
   updateActivityView();
 }
 
 function getDaysFromRangeValue(value) {
+  if (value === "8h") return 8 / 24;
+  if (value === "12h") return 12 / 24;
   if (value === "24h") return 1;
-  if (value === "7d") return 7;
-  if (value === "30d") return 30;
+  if (value === "48h") return 2;
   return clampRangeDays(DEFAULT_RANGE_DAYS);
 }
 
@@ -1237,6 +1285,59 @@ function renderLoadingState() {
   renderReportsLoading();
 }
 
+function buildDetailMarkup(info) {
+  const detailItems = [];
+  if (info.industry) detailItems.push(`Industry: ${info.industry}`);
+  if (info.address) detailItems.push(`Address: ${info.address}`);
+  if (info.website) detailItems.push(`Website: ${info.website}`);
+  if (info.phone) detailItems.push(`Phone: ${info.phone}`);
+  if (info.employees) detailItems.push(`Employees: ${info.employees}`);
+  const detailHtml = detailItems.length
+    ? detailItems
+        .slice(0, 4)
+        .map((item) => `<span class="detail-item">${escapeHtml(item)}</span>`)
+        .join("")
+    : `<span class="detail-item muted">Details unavailable</span>`;
+  const copyText = buildCompanyCopyText(info);
+  const copyAttr = copyText ? escapeAttr(encodeCopyText(copyText)) : "";
+  const copyButton = copyText
+    ? `<button class="copy-btn" type="button" data-copy="${copyAttr}">Copy info</button>`
+    : "";
+  const detailsAttr = copyText
+    ? `data-copy="${copyAttr}" title="Click to copy"`
+    : "";
+  return { detailHtml, copyButton, detailsAttr };
+}
+
+function getBusinessForVisit(visit) {
+  const businessid = getVisitBusinessId(visit);
+  if (!businessid) return null;
+  const match = state.businesses.find(
+    (item) => String(getBusinessId(item)) === String(businessid)
+  );
+  if (match) return match;
+  return {
+    BusinessID: businessid,
+    Name: `Business ${businessid}`,
+  };
+}
+
+function getVisitTimestamp(visit) {
+  return getVisitDate(visit) || getVisitStartDate(visit) || getVisitEndDate(visit);
+}
+
+function getFilteredRecentVisits(list) {
+  if (!list.length) return [];
+  const filtered = state.filters.hideGeneric
+    ? list.filter((visit) => {
+        const business = getBusinessForVisit(visit);
+        const name = business ? getBusinessName(business) : "Unknown Company";
+        return !isGenericBusinessName(name);
+      })
+    : list;
+  return filtered.slice(0, RECENT_VISIT_LIMIT);
+}
+
 function activityRow(business) {
   const name = getBusinessName(business);
   const loc = getBusinessLocation(business);
@@ -1260,26 +1361,63 @@ function activityRow(business) {
   const id = pick(business, ["BusinessID", "BusinessId", "ID", "Id"], "");
   const isNew = state.rangeStart ? isNewBusiness(business, state.rangeStart) : false;
   const tag = isNew ? `<span class="tag">New</span>` : "";
-  const detailItems = [];
-  if (info.industry) detailItems.push(`Industry: ${info.industry}`);
-  if (info.address) detailItems.push(`Address: ${info.address}`);
-  if (info.website) detailItems.push(`Website: ${info.website}`);
-  if (info.phone) detailItems.push(`Phone: ${info.phone}`);
-  if (info.employees) detailItems.push(`Employees: ${info.employees}`);
-  const detailHtml = detailItems.length
-    ? detailItems
-        .slice(0, 4)
-        .map((item) => `<span class="detail-item">${escapeHtml(item)}</span>`)
-        .join("")
-    : `<span class="detail-item muted">Details unavailable</span>`;
-  const copyText = buildCompanyCopyText(info);
-  const copyAttr = copyText ? escapeAttr(encodeCopyText(copyText)) : "";
-  const copyButton = copyText
-    ? `<button class="copy-btn" type="button" data-copy="${copyAttr}">Copy info</button>`
-    : "";
-  const detailsAttr = copyText
-    ? `data-copy="${copyAttr}" title="Click to copy"`
-    : "";
+  const { detailHtml, copyButton, detailsAttr } = buildDetailMarkup(info);
+
+  return `
+    <div class="row" role="listitem" data-bizid="${escapeAttr(String(id || ""))}">
+      <div class="badge">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M3 21h18v-2H3v2zm2-4h14V3H5v14zm2-2V5h10v10H7z"></path>
+        </svg>
+      </div>
+      <div class="row-main">
+        <div class="row-top">
+          <div class="company-wrap">
+            <button class="company-btn" type="button" data-bizid="${escapeAttr(
+              String(id || "")
+            )}" title="View activity">${escapeHtml(name)}</button>
+            ${tag}
+          </div>
+          <div class="meta">${escapeHtml(meta)}</div>
+        </div>
+        <div class="row-bot">${escapeHtml(summary)}</div>
+        <div class="row-details" ${detailsAttr}>
+          ${detailHtml}
+          ${copyButton}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function recentVisitRow(visit) {
+  const business = getBusinessForVisit(visit);
+  const name = business ? getBusinessName(business) : "Unknown Company";
+  const loc = business ? getBusinessLocation(business) : "";
+  const info = buildCompanyInfo(
+    business || { BusinessID: getVisitBusinessId(visit), Name: name }
+  );
+
+  const visitDate = getVisitTimestamp(visit);
+  const visitTime = visitDate ? formatDateTime(visitDate) : "";
+  const pages = getVisitPages(visit);
+  const ipText = getVisitIpLabel(visit);
+
+  const metaParts = ["1 visit"];
+  if (pages) metaParts.push(`${pages} page${pages === 1 ? "" : "s"}`);
+  if (ipText) metaParts.push(ipText);
+  const meta = metaParts.join(" | ");
+
+  const summaryParts = [];
+  if (loc) summaryParts.push(loc);
+  if (visitTime) summaryParts.push(visitTime);
+  const summary = summaryParts.join(" | ");
+
+  const id = business ? getBusinessId(business) : getVisitBusinessId(visit);
+  const isNew =
+    business && state.rangeStart ? isNewBusiness(business, state.rangeStart) : false;
+  const tag = isNew ? `<span class="tag">New</span>` : "";
+  const { detailHtml, copyButton, detailsAttr } = buildDetailMarkup(info);
 
   return `
     <div class="row" role="listitem" data-bizid="${escapeAttr(String(id || ""))}">
@@ -1322,6 +1460,17 @@ function renderActivityList(list) {
     return;
   }
   wrap.innerHTML = list.map(activityRow).join("");
+}
+
+function renderRecentVisitsList(list) {
+  const wrap = $("#activityList");
+  if (!wrap) return;
+
+  if (!list.length) {
+    wrap.innerHTML = `<div class="empty">No visits in this range.</div>`;
+    return;
+  }
+  wrap.innerHTML = list.map(recentVisitRow).join("");
 }
 
 function getVisitId(visit) {
@@ -1491,11 +1640,7 @@ function renderVisitsList(container, visits) {
       const dateText = formatDateTime(getVisitDate(visit) || getVisitStartDate(visit));
       const pages = getVisitPages(visit);
       const referrer = formatReferrer(visit);
-      const ip = visit._ip
-        ? `IP ${visit._ip}`
-        : isIpAllowed()
-        ? "IP n/a"
-        : "IP locked";
+      const ip = getVisitIpLabel(visit);
       const metaParts = [];
       if (ip) metaParts.push(ip);
       if (pages) metaParts.push(`${pages} page${pages === 1 ? "" : "s"}`);
@@ -1511,6 +1656,23 @@ function renderVisitsList(container, visits) {
     .join("");
 
   container.innerHTML = rows;
+}
+
+function getVisitIpLabel(visit) {
+  if (!isIpAllowed()) return "IP locked";
+  const visitId = getVisitId(visit);
+  const key = visitId ? String(visitId) : "";
+  const cached = key ? state.visitIpCache?.[key] : "";
+  const direct = visit._ip || cached || extractVisitIp(null, visit);
+  if (direct) {
+    visit._ip = direct;
+    if (key) {
+      if (!state.visitIpCache) state.visitIpCache = {};
+      state.visitIpCache[key] = direct;
+    }
+    return `IP ${direct}`;
+  }
+  return "IP n/a";
 }
 
 function isIpAllowed() {
@@ -1603,6 +1765,11 @@ async function unlockIpAccess() {
       await enrichVisitsWithIps(cached);
       renderVisitsList(wrap, cached);
     }
+  }
+
+  if (state.mode === "all" && state.showRecentVisits && state.recentVisits.length) {
+    await enrichVisitsWithIps(state.recentVisits);
+    updateActivityView();
   }
 }
 
@@ -1827,7 +1994,7 @@ async function buildAllActivityBusinesses(days, options = {}) {
   const visitStats = await collectAllVisitStats(days, {
     allowLongRange,
     maxPages: options.maxPages || MAX_ALL_VISIT_PAGES,
-    pageSize: options.pageSize || ALL_VISITS_PAGE_SIZE,
+    pageSize: options.pageSize,
     rangeEnd,
     onProgress,
   });
@@ -1874,6 +2041,7 @@ async function buildAllActivityBusinesses(days, options = {}) {
       totalBusinesses: statsList.length,
       summary,
       visitErrors: visitStats.errorCount,
+      recentVisits: visitStats.recentVisits || [],
     };
   }
 
@@ -1932,6 +2100,7 @@ async function buildAllActivityBusinesses(days, options = {}) {
     summary,
     visitErrors: visitStats.errorCount,
     businessErrors: businessResult.errorCount,
+    recentVisits: visitStats.recentVisits || [],
   };
 }
 
@@ -2467,7 +2636,7 @@ function loadSession() {
   const repCode = localStorage.getItem("lf_repCode");
   const repName = localStorage.getItem("lf_repName");
   const clientUserId = localStorage.getItem("lf_clientUserId");
-  const rangeDays = parseInt(localStorage.getItem("lf_rangeDays") || "", 10);
+  const rangeDays = parseFloat(localStorage.getItem("lf_rangeDays") || "");
 
   if (Number.isFinite(rangeDays)) {
     state.rangeDays = clampRangeDays(rangeDays);
@@ -2501,6 +2670,7 @@ function clearSession() {
   state.clientUserId = null;
   state.businesses = [];
   state.reportBusinesses = [];
+  state.recentVisits = [];
   state.activityMeta = null;
   state.pagesCache = {};
   state.visitsCache = {};
@@ -2510,6 +2680,7 @@ function clearSession() {
   state.ipUnlocked = false;
   state.longRangeTopCompanies = null;
   state.rangeStart = null;
+  state.showRecentVisits = false;
 }
 
 // ---------- main refresh ----------
@@ -2548,6 +2719,10 @@ async function refresh() {
       capped = result.capped;
       summary = result.summary;
       state.reportBusinesses = result.reportBusinesses || result.businesses;
+      state.recentVisits = result.recentVisits || [];
+      if (state.ipUnlocked) {
+        await enrichVisitsWithIps(state.recentVisits);
+      }
       state.activityMeta = {
         totalBusinesses: result.totalBusinesses,
         capped: result.capped,
@@ -2566,6 +2741,7 @@ async function refresh() {
       businesses = await hydrateBusinessesWithVisitStats(assigned, state.rangeDays);
       state.reportBusinesses = businesses;
       state.activityMeta = null;
+      state.recentVisits = [];
     }
     state.businesses = businesses;
 
@@ -2704,6 +2880,7 @@ function onRangeChange() {
   state.visitStatsCache = {};
   state.visitDetailsCache = {};
   state.visitIpCache = {};
+  if (state.mode === "all") state.showRecentVisits = true;
   if (state.mode === "assigned") saveSession();
   else localStorage.setItem("lf_rangeDays", String(state.rangeDays || DEFAULT_RANGE_DAYS));
   refresh().catch(() => {});
@@ -2717,6 +2894,7 @@ async function onExplore() {
     state.repName = null;
     state.businesses = [];
     state.reportBusinesses = [];
+    state.recentVisits = [];
     state.activityMeta = null;
     state.pagesCache = {};
     state.visitsCache = {};
@@ -2774,7 +2952,7 @@ function showAccountModal() {
     const body = `
       <div class="kv">
         ${kvRow("Mode", escapeHtml("All activity"))}
-        ${kvRow("Range", escapeHtml(String(state.rangeDays)) + "d")}
+        ${kvRow("Range", escapeHtml(formatRangeLabel(state.rangeDays)))}
       </div>
     `;
     openModal("Account", body);
@@ -2785,7 +2963,7 @@ function showAccountModal() {
     <div class="kv">
       ${kvRow("Rep", escapeHtml(state.repName))}
       ${kvRow("Code", escapeHtml(state.repCode))}
-      ${kvRow("Range", escapeHtml(String(state.rangeDays)) + "d")}
+      ${kvRow("Range", escapeHtml(formatRangeLabel(state.rangeDays)))}
     </div>
   `;
   openModal("Account", body);
