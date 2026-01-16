@@ -19,7 +19,10 @@ const ALL_VISITS_PAGE_SIZE = 20;
 const MAX_ALL_VISIT_PAGES = 300;
 const ALL_BUSINESS_PAGE_SIZE = 100;
 const MAX_ALL_BUSINESS_PAGES = 120;
-const VISIT_FETCH_CONCURRENCY = 6;
+const VISIT_FETCH_CONCURRENCY = 4;
+const REQUEST_GAP_MS = 150;
+const RATE_LIMIT_RETRIES = 4;
+const RATE_LIMIT_BASE_DELAY_MS = 800;
 const MAX_ACTIVITY_COMPANIES = 60;
 const VISIT_SUMMARY_PAGE_SIZE = 10;
 const DETAILS_BATCH_SIZE = 6;
@@ -63,6 +66,10 @@ const state = {
 // ---------- tiny DOM helpers ----------
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => Array.from(document.querySelectorAll(sel));
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 function setText(sel, txt) {
   const el = $(sel);
@@ -195,6 +202,16 @@ function parseDate(value) {
 }
 
 // ---------- fetch wrapper ----------
+let requestQueue = Promise.resolve();
+
+function enqueueRequest(task) {
+  const run = requestQueue
+    .then(() => task())
+    .finally(() => sleep(REQUEST_GAP_MS));
+  requestQueue = run.catch(() => {});
+  return run;
+}
+
 async function lfFetch(path, params = {}) {
   const url = new URL(WORKER_BASE.replace(/\/$/, "") + path);
 
@@ -203,30 +220,47 @@ async function lfFetch(path, params = {}) {
     url.searchParams.set(k, String(v));
   });
 
-  const res = await fetch(url.toString(), {
-    method: "GET",
-    headers: { Accept: "application/json" },
-    cache: "no-store",
+  return enqueueRequest(async () => {
+    let attempt = 0;
+    while (true) {
+      const res = await fetch(url.toString(), {
+        method: "GET",
+        headers: { Accept: "application/json" },
+        cache: "no-store",
+      });
+
+      if (res.status === 429 && attempt < RATE_LIMIT_RETRIES) {
+        const retryAfter = Number(res.headers.get("Retry-After") || 0);
+        const backoff = Math.min(
+          RATE_LIMIT_BASE_DELAY_MS * Math.pow(2, attempt),
+          5000
+        );
+        const waitMs = retryAfter > 0 ? retryAfter * 1000 : backoff;
+        await sleep(waitMs);
+        attempt += 1;
+        continue;
+      }
+
+      if (!res.ok) {
+        const body = await res.text().catch(() => "");
+        const upstreamUrl = res.headers.get("X-Upstream-Url");
+        const upstreamStatus = res.headers.get("X-Upstream-Status");
+        const extra = upstreamUrl
+          ? ` (upstream ${upstreamStatus || res.status}: ${upstreamUrl})`
+          : "";
+        throw new Error(
+          `LeadForensics proxy error ${res.status}${extra}: ${body.slice(0, 200)}`
+        );
+      }
+
+      const text = await res.text();
+      try {
+        return JSON.parse(text);
+      } catch {
+        return text;
+      }
+    }
   });
-
-  if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    const upstreamUrl = res.headers.get("X-Upstream-Url");
-    const upstreamStatus = res.headers.get("X-Upstream-Status");
-    const extra = upstreamUrl
-      ? ` (upstream ${upstreamStatus || res.status}: ${upstreamUrl})`
-      : "";
-    throw new Error(
-      `LeadForensics proxy error ${res.status}${extra}: ${body.slice(0, 200)}`
-    );
-  }
-
-  const text = await res.text();
-  try {
-    return JSON.parse(text);
-  } catch {
-    return text;
-  }
 }
 
 function isNotFoundError(err) {
