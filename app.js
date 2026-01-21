@@ -73,6 +73,8 @@ const state = {
     newOnly: false,
     hideGeneric: DEFAULT_HIDE_GENERIC,
     returningOnly: false,
+    country: "",
+    state: "",
   },
 };
 
@@ -430,6 +432,23 @@ function getBusinessLocation(business) {
   return [city, stateProv, country].filter(Boolean).join(", ");
 }
 
+function getBusinessCountry(business) {
+  const rawCountry = pick(business, ["Country", "CountryName"], "");
+  return normalizeCountryName(rawCountry);
+}
+
+function getBusinessStateLabel(business) {
+  const rawCity = pick(business, ["City", "Town", "Locality", "LocationCity"], "");
+  const parsed = parseCityState(rawCity);
+  const rawState = pick(
+    business,
+    ["State", "StateName", "StateProvince", "Region", "County", "Province", "ProvinceName"],
+    ""
+  );
+  const country = getBusinessCountry(business);
+  return normalizeStateAbbrev(parsed.state || rawState, country);
+}
+
 const US_STATE_ABBREV = {
   "ALABAMA": "AL",
   "ALASKA": "AK",
@@ -619,17 +638,21 @@ function filtersActive() {
     state.filters.minVisits > 0 ||
     state.filters.newOnly === true ||
     state.filters.hideGeneric !== DEFAULT_HIDE_GENERIC ||
-    state.filters.returningOnly === true
+    state.filters.returningOnly === true ||
+    !!state.filters.country ||
+    !!state.filters.state
   );
 }
 
-function getFilteredBusinesses(list) {
+function filterBusinesses(list, filters) {
   if (!list.length) return [];
-  const query = String(state.filters.query || "").trim().toLowerCase();
-  const minVisits = Number(state.filters.minVisits || 0);
-  const requireNew = !!state.filters.newOnly;
-  const hideGeneric = !!state.filters.hideGeneric;
-  const requireReturning = !!state.filters.returningOnly;
+  const query = String(filters.query || "").trim().toLowerCase();
+  const minVisits = Number(filters.minVisits || 0);
+  const requireNew = !!filters.newOnly;
+  const hideGeneric = !!filters.hideGeneric;
+  const requireReturning = !!filters.returningOnly;
+  const filterCountry = String(filters.country || "").trim();
+  const filterState = String(filters.state || "").trim();
   const rangeStart = state.rangeStart || getRangeStartDate(state.rangeDays);
 
   return list.filter((business) => {
@@ -637,12 +660,24 @@ function getFilteredBusinesses(list) {
     if (minVisits && getVisitCount(business) < minVisits) return false;
     if (requireReturning && getVisitCount(business) <= 1) return false;
     if (requireNew && !isNewBusiness(business, rangeStart)) return false;
+    if (filterCountry) {
+      const country = getBusinessCountry(business);
+      if (!country || country !== filterCountry) return false;
+    }
+    if (filterState) {
+      const stateName = getBusinessStateLabel(business);
+      if (!stateName || stateName !== filterState) return false;
+    }
     if (query) {
       const hay = getBusinessSearchText(business);
       if (!hay.includes(query)) return false;
     }
     return true;
   });
+}
+
+function getFilteredBusinesses(list) {
+  return filterBusinesses(list, state.filters);
 }
 
 function sortBusinesses(list) {
@@ -1195,6 +1230,13 @@ function setActiveTile(tile) {
   updateFilterSummary();
 }
 
+function updateLocationTileState() {
+  const el = $("#tileLocation");
+  if (!el) return;
+  const isActive = !!(state.filters.country || state.filters.state);
+  el.classList.toggle("active", isActive);
+}
+
 function updateFilterSummary() {
   const el = $("#filterSummary");
   if (!el) return;
@@ -1202,9 +1244,9 @@ function updateFilterSummary() {
   if (state.mode === "all" && state.showRecentVisits) {
     bits.push("Recent visits");
   }
-  if (state.activeTile === "new") {
+  if (state.filters.newOnly) {
     bits.push("New visits");
-  } else if (state.activeTile === "returning") {
+  } else if (state.filters.returningOnly) {
     bits.push("Returning");
   } else {
     if (state.filters.minVisits >= 25) bits.push("25+ visits");
@@ -1213,10 +1255,13 @@ function updateFilterSummary() {
     else if (state.filters.minVisits >= 2) bits.push("2+ visits");
     else bits.push("All visits");
   }
+  if (state.filters.country) bits.push(`Country: ${state.filters.country}`);
+  if (state.filters.state) bits.push(`State: ${state.filters.state}`);
   if (state.filters.hideGeneric) bits.push("Hide generic");
   if (state.filters.query) bits.push(`Search: ${state.filters.query}`);
   bits.push(`Sort: ${sortLabel()}`);
   el.textContent = bits.join(" | ");
+  updateLocationTileState();
 }
 
 function sortLabel() {
@@ -1320,6 +1365,155 @@ function openVisitsFilterModal() {
   });
 }
 
+function getLocationOptionSource() {
+  const baseFilters = {
+    ...state.filters,
+    country: "",
+    state: "",
+  };
+  return filterBusinesses(state.businesses, baseFilters);
+}
+
+function buildLocationOptions(list) {
+  const countrySet = new Set();
+  const stateSet = new Set();
+  const statesByCountry = new Map();
+
+  list.forEach((business) => {
+    const country = getBusinessCountry(business);
+    const stateName = getBusinessStateLabel(business);
+    if (country) {
+      countrySet.add(country);
+      if (stateName) {
+        if (!statesByCountry.has(country)) statesByCountry.set(country, new Set());
+        statesByCountry.get(country).add(stateName);
+      }
+    }
+    if (stateName) stateSet.add(stateName);
+  });
+
+  const countries = Array.from(countrySet).sort((a, b) => a.localeCompare(b));
+  const states = Array.from(stateSet).sort((a, b) => a.localeCompare(b));
+  const byCountry = new Map();
+  statesByCountry.forEach((set, country) => {
+    const items = Array.from(set).sort((a, b) => a.localeCompare(b));
+    byCountry.set(country, items);
+  });
+
+  return { countries, states, statesByCountry: byCountry };
+}
+
+function buildSelectOptions(items, selected) {
+  return items
+    .map((value) => {
+      const isSelected = value === selected ? " selected" : "";
+      return `<option value="${escapeAttr(value)}"${isSelected}>${escapeHtml(value)}</option>`;
+    })
+    .join("");
+}
+
+function openLocationFilterModal() {
+  const source = getLocationOptionSource();
+  const locationOptions = buildLocationOptions(source);
+  const hasCountries = locationOptions.countries.length > 0;
+  const hasStates = locationOptions.states.length > 0;
+
+  if (!hasCountries && !hasStates) {
+    openModal("Location filters", `<div class="empty">No location data available.</div>`);
+    return;
+  }
+
+  const selectedCountry = state.filters.country || "";
+  const statesForCountry =
+    selectedCountry && locationOptions.statesByCountry.has(selectedCountry)
+      ? locationOptions.statesByCountry.get(selectedCountry) || []
+      : locationOptions.states;
+  const selectedState = statesForCountry.includes(state.filters.state)
+    ? state.filters.state
+    : "";
+
+  const countryOptions = buildSelectOptions(locationOptions.countries, selectedCountry);
+  const stateOptions = buildSelectOptions(statesForCountry, selectedState);
+  const countryDisabled = hasCountries ? "" : "disabled";
+  const stateDisabled = hasStates ? "" : "disabled";
+
+  const bodyHtml = `
+    <div class="modal-form">
+      <label for="locationCountry">Country</label>
+      <div class="select small">
+        <select id="locationCountry" ${countryDisabled}>
+          <option value="">All countries</option>
+          ${countryOptions}
+        </select>
+        <svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10l5 5 5-5z"/></svg>
+      </div>
+      <label for="locationState">State / Region</label>
+      <div class="select small">
+        <select id="locationState" ${stateDisabled}>
+          <option value="">All states</option>
+          ${stateOptions}
+        </select>
+        <svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10l5 5 5-5z"/></svg>
+      </div>
+      <div class="modal-actions">
+        <button class="secondary-btn small" id="btnClearLocation" type="button">Clear</button>
+        <button class="secondary-btn small" id="btnApplyLocation" type="button">Apply</button>
+      </div>
+    </div>
+  `;
+  openModal("Location filters", bodyHtml);
+
+  const countrySelect = $("#locationCountry");
+  const stateSelect = $("#locationState");
+
+  const updateStateOptions = () => {
+    if (!stateSelect) return;
+    const country = countrySelect ? countrySelect.value : "";
+    const states =
+      country && locationOptions.statesByCountry.has(country)
+        ? locationOptions.statesByCountry.get(country) || []
+        : locationOptions.states;
+    const selected = states.includes(stateSelect.value) ? stateSelect.value : "";
+    stateSelect.innerHTML = `<option value="">All states</option>${buildSelectOptions(
+      states,
+      selected
+    )}`;
+    stateSelect.disabled = states.length === 0;
+    stateSelect.value = selected;
+  };
+
+  if (countrySelect) {
+    countrySelect.addEventListener("change", updateStateOptions);
+  }
+
+  $("#btnClearLocation")?.addEventListener("click", () => {
+    state.filters.country = "";
+    state.filters.state = "";
+    if (state.mode === "all") state.showRecentVisits = false;
+    closeModal();
+    updateActivityView();
+  });
+
+  $("#btnApplyLocation")?.addEventListener("click", () => {
+    const country = countrySelect ? countrySelect.value : "";
+    const states =
+      country && locationOptions.statesByCountry.has(country)
+        ? locationOptions.statesByCountry.get(country) || []
+        : locationOptions.states;
+    const nextState =
+      stateSelect && states.includes(stateSelect.value) ? stateSelect.value : "";
+    state.filters.country = country;
+    state.filters.state = nextState;
+    if (state.mode === "all") state.showRecentVisits = false;
+    closeModal();
+    updateActivityView();
+  });
+}
+
+function applyTileLocation() {
+  openLocationFilterModal();
+}
+
 function syncFiltersFromUI() {
   const searchInput = $("#searchInput");
 
@@ -1334,6 +1528,8 @@ function applyFilterDefaults() {
     newOnly: false,
     hideGeneric: DEFAULT_HIDE_GENERIC,
     returningOnly: false,
+    country: "",
+    state: "",
   };
 }
 
@@ -1458,6 +1654,9 @@ function updateTiles({ newCount, totalVisits, returningCount }) {
   setText("#valNew", String(newCount));
   setText("#valVisits", String(totalVisits));
   setText("#valReturning", String(returningCount));
+  const locations = buildLocationOptions(state.businesses || []);
+  const locationCount = locations.states.length || locations.countries.length;
+  setText("#valLocation", String(locationCount));
 }
 
 function renderActivityLoading() {
@@ -3206,7 +3405,7 @@ function onRangeChange() {
   state.visitStatsCache = {};
   state.visitDetailsCache = {};
   state.visitIpCache = {};
-  if (state.mode === "all") state.showRecentVisits = true;
+  if (state.mode === "all") state.showRecentVisits = !filtersActive();
   if (state.mode === "assigned") saveSession();
   else localStorage.setItem("lf_rangeDays", String(state.rangeDays || DEFAULT_RANGE_DAYS));
   refresh().catch(() => {});
@@ -3395,6 +3594,7 @@ function boot() {
   $("#tileNew")?.addEventListener("click", applyTileNew);
   $("#tileVisits")?.addEventListener("click", applyTileVisits);
   $("#tileReturning")?.addEventListener("click", applyTileReturning);
+  $("#tileLocation")?.addEventListener("click", applyTileLocation);
   $$(".tab").forEach((btn) => {
     btn.addEventListener("click", () => setActiveTab(btn.dataset.tab || "activity"));
   });
