@@ -30,6 +30,8 @@ const REPORT_COMPANY_LIMIT = 120;
 const TOP_COMPANY_RANGE_DAYS = 365;
 const DEFAULT_HIDE_GENERIC = true;
 const RECENT_VISIT_LIMIT = 10;
+const POPULAR_PAGES_PAGE_SIZE = 50;
+const POPULAR_PAGES_LIMIT = 5;
 
 const state = {
   repCode: null,
@@ -40,6 +42,8 @@ const state = {
   businesses: [],
   reportBusinesses: [],
   recentVisits: [],
+  popularPages: [],
+  popularPagesStatus: "idle",
   activityMeta: null,
   mode: "signed_out",
   assignedSource: "assigned",
@@ -208,10 +212,64 @@ function parseDate(value) {
 // ---------- fetch wrapper ----------
 let requestQueue = Promise.resolve();
 let requestGapMs = REQUEST_GAP_MS;
+const RATE_LIMIT_RULES = [
+  { windowMs: 1000, limit: 5 },
+  { windowMs: 60 * 1000, limit: 50 },
+  { windowMs: 60 * 60 * 1000, limit: 250 },
+  { windowMs: 24 * 60 * 60 * 1000, limit: 1000 },
+  { windowMs: 7 * 24 * 60 * 60 * 1000, limit: 5000 },
+];
+const RATE_LIMIT_BUFFER = 1;
+const MAX_RATE_WINDOW = RATE_LIMIT_RULES[RATE_LIMIT_RULES.length - 1].windowMs;
+let rateHistory = [];
+
+function pruneRateHistory(now) {
+  rateHistory = rateHistory.filter((ts) => now - ts < MAX_RATE_WINDOW);
+}
+
+function getWindowStats(now, windowMs) {
+  let idx = 0;
+  while (idx < rateHistory.length && now - rateHistory[idx] >= windowMs) {
+    idx += 1;
+  }
+  return {
+    count: rateHistory.length - idx,
+    earliest: rateHistory[idx],
+  };
+}
+
+async function waitForRateLimit() {
+  while (true) {
+    const now = Date.now();
+    pruneRateHistory(now);
+    let waitMs = 0;
+    for (const rule of RATE_LIMIT_RULES) {
+      const threshold = Math.max(1, rule.limit - RATE_LIMIT_BUFFER);
+      const { count, earliest } = getWindowStats(now, rule.windowMs);
+      if (count >= threshold && earliest) {
+        const remaining = rule.windowMs - (now - earliest) + 25;
+        if (remaining > waitMs) waitMs = remaining;
+      }
+    }
+    if (waitMs <= 0) return;
+    if (state.isLoading) {
+      setStatus(`Rate limit pause (${Math.ceil(waitMs / 1000)}s)`, "warn");
+    }
+    await sleep(waitMs);
+  }
+}
+
+function recordRateHit() {
+  rateHistory.push(Date.now());
+}
 
 function enqueueRequest(task) {
   const run = requestQueue
-    .then(() => task())
+    .then(async () => {
+      await waitForRateLimit();
+      recordRateHit();
+      return task();
+    })
     .finally(() => sleep(requestGapMs));
   requestQueue = run.catch(() => {});
   return run;
@@ -351,6 +409,14 @@ function getBusinessLocation(business) {
   const stateProv = pick(business, ["State", "Region", "County", "StateProvince"], "");
   const country = pick(business, ["Country", "CountryName"], "");
   return [city, stateProv, country].filter(Boolean).join(", ");
+}
+
+function getBusinessState(business) {
+  return pick(
+    business,
+    ["State", "StateName", "StateProvince", "Region", "County", "Province", "ProvinceName"],
+    ""
+  );
 }
 
 function getBusinessSearchText(business) {
@@ -636,6 +702,16 @@ function extractBusinessList(data) {
   return { businesses: list, pageCount, recordCount };
 }
 
+function extractPagesList(data) {
+  const primary = asArray(data);
+  const list = primary.length
+    ? primary
+    : asArray(pick(data, ["PagesList", "PageList", "Pages", "Results"], [])) || [];
+  const pageCount = toNumber(pick(data, ["PageCount", "pagecount"], 0));
+  const recordCount = toNumber(pick(data, ["RecordCount", "recordcount"], list.length));
+  return { pages: list, pageCount, recordCount };
+}
+
 async function getAllVisitsResponse(
   days,
   pageSize = ALL_VISITS_PAGE_SIZE,
@@ -751,6 +827,16 @@ async function getVisitsByBusiness(businessid, days, pageSize = 5, pageNo = 1) {
   return extractVisitList(data).visits;
 }
 
+async function getPages(datefrom, dateto, pageSize = PAGE_PAGE_SIZE, pageNo = 1) {
+  const data = await lfFetch("/WebApi_v2/Page/GetPages", {
+    datefrom,
+    dateto,
+    pagesize: pageSize,
+    pageno: pageNo,
+  });
+  return extractPagesList(data).pages;
+}
+
 async function getPagesByVisit(visitid, pageSize = PAGE_PAGE_SIZE, pageNo = 1) {
   const data = await lfFetch("/WebApi_v2/Page/GetPagesByVisit", {
     visitid,
@@ -775,6 +861,8 @@ function renderSignedOut() {
   state.mode = "signed_out";
   state.showRecentVisits = false;
   state.recentVisits = [];
+  state.popularPages = [];
+  state.popularPagesStatus = "idle";
   show("#signinPanel");
   hide("#dashPanel");
   hide("#repPill");
@@ -2110,6 +2198,64 @@ function formatNumber(value) {
   return num.toLocaleString();
 }
 
+function getPopularPageViews(page) {
+  const count = toNumber(
+    pick(
+      page,
+      [
+        "Views",
+        "PageViews",
+        "PageView",
+        "Visits",
+        "VisitCount",
+        "Count",
+        "Total",
+        "TotalViews",
+        "PageCount",
+      ],
+      0
+    )
+  );
+  return count || 1;
+}
+
+function formatPageLabel(url) {
+  const raw = String(url || "").trim();
+  if (!raw) return "";
+  return raw.replace(/^https?:\/\//i, "").replace(/\/$/, "");
+}
+
+function buildPopularPagesList(pages, limit = POPULAR_PAGES_LIMIT) {
+  const map = new Map();
+  for (const page of pages) {
+    const url = extractPageUrl(page);
+    if (!url) continue;
+    const key = String(url);
+    const entry = map.get(key) || {
+      label: formatPageLabel(key),
+      value: 0,
+      title: key,
+    };
+    entry.value += getPopularPageViews(page);
+    map.set(key, entry);
+  }
+  return Array.from(map.values())
+    .filter((item) => item.value > 0)
+    .sort((a, b) => b.value - a.value)
+    .slice(0, limit);
+}
+
+async function loadPopularPagesReport(days, options = {}) {
+  const range = rangeFromDays(days, { end: options.rangeEnd });
+  const pages = await getPages(
+    range.datefrom,
+    range.dateto,
+    options.pageSize || POPULAR_PAGES_PAGE_SIZE,
+    1
+  );
+  return buildPopularPagesList(pages, options.limit || POPULAR_PAGES_LIMIT);
+}
+
 function buildTopCompanies(list, limit = 5) {
   return list
     .map((business) => ({
@@ -2188,23 +2334,24 @@ function buildRecentList(list, limit = 5) {
     .slice(0, limit);
 }
 
-function renderBarCard(title, subtitle, items) {
+function renderBarCard(title, subtitle, items, emptyMessage = "No data yet.") {
   const hasValues = items.some((item) => item.value > 0);
   const maxValue = items.reduce((max, item) => Math.max(max, item.value), 1);
   const rows = items.length && hasValues
     ? items
         .map((item, idx) => {
           const pct = Math.max(6, Math.round((item.value / maxValue) * 100));
+          const labelTitle = escapeAttr(item.title || item.label);
           return `
             <div class="bar-row">
-              <div class="bar-label" title="${escapeAttr(item.label)}">${escapeHtml(item.label)}</div>
+              <div class="bar-label" title="${labelTitle}">${escapeHtml(item.label)}</div>
               <div class="bar-track"><span class="bar-fill" style="--pct:${pct}%; --delay:${idx * 0.06}s"></span></div>
               <div class="bar-val">${escapeHtml(formatNumber(item.value))}</div>
             </div>
           `;
         })
         .join("")
-    : `<div class="report-empty">No data yet.</div>`;
+    : `<div class="report-empty">${escapeHtml(emptyMessage)}</div>`;
 
   return `
     <div class="report-card">
@@ -2250,31 +2397,34 @@ function renderReports(list, reportSource) {
   const filtered = getFilteredBusinesses(source);
   updateReportsNote(source.length);
 
+  const popularPagesStatus = state.popularPagesStatus || "idle";
+  const popularPages =
+    popularPagesStatus === "ready" ? state.popularPages || [] : [];
+  const popularPagesSubtitle =
+    popularPagesStatus === "loading"
+      ? "Loading pages..."
+      : popularPagesStatus === "error"
+      ? "Pages unavailable"
+      : "By views";
+  const popularPagesEmpty =
+    popularPagesStatus === "loading"
+      ? "Loading pages..."
+      : popularPagesStatus === "error"
+      ? "Pages unavailable"
+      : "No page data yet.";
+
   if (!filtered.length) {
     const msg = filtersActive() ? "No data for current filters." : "No data for this range.";
-    grid.innerHTML = `<div class="report-empty">${msg}</div>`;
-    return;
+    const hasPageData = popularPages.length || popularPagesStatus === "loading";
+    if (!hasPageData) {
+      grid.innerHTML = `<div class="report-empty">${msg}</div>`;
+      return;
+    }
   }
 
-  const allowLongRange = state.mode === "all" && !filtersActive();
-  const longRangeStatus = allowLongRange
-    ? state.longRangeTopCompanies?.status
-    : null;
-  const longRange =
-    allowLongRange &&
-    state.longRangeTopCompanies &&
-    state.longRangeTopCompanies.status === "ready"
-      ? state.longRangeTopCompanies
-      : null;
-  const topCompanies =
-    longRangeStatus === "loading"
-      ? []
-      : longRange
-      ? longRange.list
-      : buildTopCompanies(filtered, 5);
-  const locations = buildTopGroups(
+  const states = buildTopGroups(
     filtered,
-    (business) => pick(business, ["Country", "CountryName"], "Unknown"),
+    (business) => getBusinessState(business) || "Unknown",
     5
   );
   const industries = buildTopGroups(
@@ -2287,15 +2437,14 @@ function renderReports(list, reportSource) {
     (item) => String(item.label || "").toLowerCase() !== "unknown"
   );
 
-  const topCompaniesSubtitle =
-    longRangeStatus === "loading"
-      ? "Loading 12-month view..."
-      : longRange
-      ? `By visits (last 12 mo${longRange.capped ? ", sample" : ""})`
-      : "By visits";
   const cards = [
-    renderBarCard("Top companies", topCompaniesSubtitle, topCompanies),
-    renderBarCard("Top locations", "By visits", locations),
+    renderBarCard(
+      "Most popular pages",
+      popularPagesSubtitle,
+      popularPages,
+      popularPagesEmpty
+    ),
+    renderBarCard("Top states", "By visits", states),
   ];
 
   if (industries.length && hasIndustry) {
@@ -2671,6 +2820,8 @@ function clearSession() {
   state.businesses = [];
   state.reportBusinesses = [];
   state.recentVisits = [];
+  state.popularPages = [];
+  state.popularPagesStatus = "idle";
   state.activityMeta = null;
   state.pagesCache = {};
   state.visitsCache = {};
@@ -2693,6 +2844,8 @@ async function refresh() {
   state.rateLimited = false;
   setLoading(true);
   renderLoadingState();
+  state.popularPagesStatus = "loading";
+  state.popularPages = [];
   try {
     const rangeEnd = new Date();
     const rangeStart = new Date(
@@ -2743,6 +2896,15 @@ async function refresh() {
       state.activityMeta = null;
       state.recentVisits = [];
     }
+
+    try {
+      state.popularPages = await loadPopularPagesReport(state.rangeDays, { rangeEnd });
+      state.popularPagesStatus = "ready";
+    } catch (e) {
+      console.error(e);
+      state.popularPages = [];
+      state.popularPagesStatus = "error";
+    }
     state.businesses = businesses;
 
     state.rangeStart = rangeStart;
@@ -2762,9 +2924,6 @@ async function refresh() {
 
     updateTiles(summary);
     updateActivityView();
-    if (state.mode === "all") {
-      loadLongRangeTopCompanies().catch(() => {});
-    }
     if (businesses.length) {
       const errorCount =
         (state.activityMeta?.visitErrors || 0) +
@@ -2777,6 +2936,7 @@ async function refresh() {
     } else setStatus("No activity in range", "warn");
   } catch (e) {
     console.error(e);
+    state.popularPagesStatus = "error";
     setStatus("Failed to load data", "bad");
     notify(e.message || "Failed to load Lead Forensics data.", "bad");
   } finally {
@@ -2839,6 +2999,8 @@ function onSignOut() {
     state.longRangeTopCompanies = null;
     state.businesses = [];
     state.reportBusinesses = [];
+    state.popularPages = [];
+    state.popularPagesStatus = "idle";
     state.activityMeta = null;
     const wrap = $("#activityList");
     if (wrap) wrap.innerHTML = "";
@@ -2859,6 +3021,8 @@ function onSignOut() {
   state.longRangeTopCompanies = null;
   state.businesses = [];
   state.reportBusinesses = [];
+  state.popularPages = [];
+  state.popularPagesStatus = "idle";
   state.activityMeta = null;
   renderSignedOut();
   const wrap = $("#activityList");
@@ -2894,6 +3058,8 @@ async function onExplore() {
     state.repName = null;
     state.businesses = [];
     state.reportBusinesses = [];
+    state.popularPages = [];
+    state.popularPagesStatus = "idle";
     state.recentVisits = [];
     state.activityMeta = null;
     state.pagesCache = {};
