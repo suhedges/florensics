@@ -12,7 +12,8 @@ const WORKER_BASE = "https://leadforensics-proxy.sethh.workers.dev";
 const DEFAULT_RANGE_DAYS = 1;
 const MIN_RANGE_DAYS = 8 / 24;
 const LOGIN_LOOKBACK_DAYS = 30;
-const MAX_RANGE_DAYS = 2;
+const MAX_RANGE_DAYS_ALL = 2;
+const MAX_RANGE_DAYS_ASSIGNED = 14;
 const MAX_VISIT_LOOKUP = 6;
 const MAX_PAGE_RESULTS = 25;
 const PAGE_PAGE_SIZE = 10;
@@ -161,10 +162,11 @@ function lfDateTime(d) {
   return `${dd}-${mm}-${yyyy} ${hh}:${mi}:${ss}`;
 }
 
-function clampRangeDays(days) {
+function clampRangeDays(days, mode = state.mode) {
   const num = Number(days);
   if (!Number.isFinite(num)) return DEFAULT_RANGE_DAYS;
-  return Math.min(Math.max(num, MIN_RANGE_DAYS), MAX_RANGE_DAYS);
+  const maxDays = mode === "assigned" ? MAX_RANGE_DAYS_ASSIGNED : MAX_RANGE_DAYS_ALL;
+  return Math.min(Math.max(num, MIN_RANGE_DAYS), maxDays);
 }
 
 function rangeFromDays(days, options = {}) {
@@ -1001,7 +1003,7 @@ function renderSignedIn() {
   setSignOutLabel(state.mode);
   renderRepPill();
   setActiveTab("activity");
-  setRangeSelect(state.rangeDays);
+  syncRangeSelectOptions();
   const refreshBtn = $("#btnRefresh");
   if (refreshBtn) refreshBtn.disabled = false;
   const rangeSelect = $("#rangeSelect");
@@ -1022,7 +1024,7 @@ function renderExplore() {
   setSignOutLabel(state.mode);
   renderRepPill();
   setActiveTab("activity");
-  setRangeSelect(state.rangeDays);
+  syncRangeSelectOptions();
   const refreshBtn = $("#btnRefresh");
   if (refreshBtn) refreshBtn.disabled = false;
   const rangeSelect = $("#rangeSelect");
@@ -1070,7 +1072,16 @@ function setActiveTab(tab) {
 function setRangeSelect(days) {
   const select = $("#rangeSelect");
   if (!select) return;
-  const safeHours = clampRangeDays(days) * 24;
+  const safeDays = clampRangeDays(days);
+  const safeHours = safeDays * 24;
+  if (safeDays >= 14 && select.querySelector('option[value="14d"]')) {
+    select.value = "14d";
+    return;
+  }
+  if (safeDays >= 7 && select.querySelector('option[value="7d"]')) {
+    select.value = "7d";
+    return;
+  }
   if (safeHours <= 8) select.value = "8h";
   else if (safeHours <= 12) select.value = "12h";
   else if (safeHours <= 24) select.value = "24h";
@@ -1078,8 +1089,32 @@ function setRangeSelect(days) {
 }
 
 function formatRangeLabel(days) {
-  const safeHours = Math.round(clampRangeDays(days) * 24);
+  const safeDays = clampRangeDays(days);
+  if (safeDays >= 7) return `${Math.round(safeDays)}d`;
+  const safeHours = Math.round(safeDays * 24);
   return `${safeHours}h`;
+}
+
+function syncRangeSelectOptions() {
+  const select = $("#rangeSelect");
+  if (!select) return;
+  state.rangeDays = clampRangeDays(state.rangeDays);
+  const options =
+    state.mode === "assigned"
+      ? ["8h", "12h", "24h", "48h", "7d", "14d"]
+      : ["8h", "12h", "24h", "48h"];
+  const labels = {
+    "8h": "8h",
+    "12h": "12h",
+    "24h": "24h",
+    "48h": "48h",
+    "7d": "7d",
+    "14d": "14d",
+  };
+  select.innerHTML = options
+    .map((value) => `<option value="${value}">${labels[value]}</option>`)
+    .join("");
+  setRangeSelect(state.rangeDays);
 }
 
 function updateListCount(visibleCount, totalCount, label = "company") {
@@ -1325,6 +1360,8 @@ function getDaysFromRangeValue(value) {
   if (value === "12h") return 12 / 24;
   if (value === "24h") return 1;
   if (value === "48h") return 2;
+  if (value === "7d") return 7;
+  if (value === "14d") return 14;
   return clampRangeDays(DEFAULT_RANGE_DAYS);
 }
 
@@ -2892,12 +2929,13 @@ function loadSession() {
   const repName = localStorage.getItem("lf_repName");
   const clientUserId = localStorage.getItem("lf_clientUserId");
   const rangeDays = parseFloat(localStorage.getItem("lf_rangeDays") || "");
+  const hasSession = !!(repCode && repName && clientUserId);
 
   if (Number.isFinite(rangeDays)) {
-    state.rangeDays = clampRangeDays(rangeDays);
+    state.rangeDays = clampRangeDays(rangeDays, hasSession ? "assigned" : "all");
   }
 
-  if (repCode && repName && clientUserId) {
+  if (hasSession) {
     state.repCode = normalizeRepCode(repCode, repName);
     state.repName = repName;
     state.clientUserId = clientUserId;
