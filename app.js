@@ -1375,26 +1375,36 @@ function renderLoadingState() {
 
 function buildDetailMarkup(info) {
   const detailItems = [];
-  if (info.industry) detailItems.push(`Industry: ${info.industry}`);
-  if (info.address) detailItems.push(`Address: ${info.address}`);
-  if (info.website) detailItems.push(`Website: ${info.website}`);
-  if (info.phone) detailItems.push(`Phone: ${info.phone}`);
-  if (info.employees) detailItems.push(`Employees: ${info.employees}`);
+  if (info.industry) detailItems.push({ label: "Industry", value: info.industry });
+  if (info.address) detailItems.push({ label: "Address", value: info.address });
+  if (info.website) detailItems.push({ label: "Website", value: info.website });
+  if (info.phone) detailItems.push({ label: "Phone", value: info.phone });
+  if (info.employees) detailItems.push({ label: "Employees", value: info.employees });
+
   const detailHtml = detailItems.length
-    ? detailItems
-        .slice(0, 4)
-        .map((item) => `<span class="detail-item">${escapeHtml(item)}</span>`)
-        .join("")
+    ? `
+      <div class="detail-badge">
+        ${detailItems
+          .map((item, idx) => {
+            const value = String(item.value || "").trim();
+            const copyAttr = escapeAttr(encodeCopyText(value));
+            const title = `Copy ${item.label}`;
+            const sep = idx < detailItems.length - 1 ? `<span class="detail-sep">•</span>` : "";
+            return `
+              <button class="detail-chip" type="button" data-copy="${copyAttr}" title="${escapeAttr(
+                title
+              )}">
+                <span class="detail-label">${escapeHtml(item.label)}:</span> ${escapeHtml(value)}
+              </button>
+              ${sep}
+            `;
+          })
+          .join("")}
+      </div>
+    `
     : `<span class="detail-item muted">Details unavailable</span>`;
-  const copyText = buildCompanyCopyText(info);
-  const copyAttr = copyText ? escapeAttr(encodeCopyText(copyText)) : "";
-  const copyButton = copyText
-    ? `<button class="copy-btn" type="button" data-copy="${copyAttr}">Copy info</button>`
-    : "";
-  const detailsAttr = copyText
-    ? `data-copy="${copyAttr}" title="Click to copy"`
-    : "";
-  return { detailHtml, copyButton, detailsAttr };
+
+  return { detailHtml };
 }
 
 function getBusinessForVisit(visit) {
@@ -1449,7 +1459,7 @@ function activityRow(business) {
   const id = pick(business, ["BusinessID", "BusinessId", "ID", "Id"], "");
   const isNew = state.rangeStart ? isNewBusiness(business, state.rangeStart) : false;
   const tag = isNew ? `<span class="tag">New</span>` : "";
-  const { detailHtml, copyButton, detailsAttr } = buildDetailMarkup(info);
+  const { detailHtml } = buildDetailMarkup(info);
 
   return `
     <div class="row" role="listitem" data-bizid="${escapeAttr(String(id || ""))}">
@@ -1469,10 +1479,7 @@ function activityRow(business) {
           <div class="meta">${escapeHtml(meta)}</div>
         </div>
         <div class="row-bot">${escapeHtml(summary)}</div>
-        <div class="row-details" ${detailsAttr}>
-          ${detailHtml}
-          ${copyButton}
-        </div>
+        <div class="row-details">${detailHtml}</div>
       </div>
     </div>
   `;
@@ -1505,7 +1512,7 @@ function recentVisitRow(visit) {
   const isNew =
     business && state.rangeStart ? isNewBusiness(business, state.rangeStart) : false;
   const tag = isNew ? `<span class="tag">New</span>` : "";
-  const { detailHtml, copyButton, detailsAttr } = buildDetailMarkup(info);
+  const { detailHtml } = buildDetailMarkup(info);
 
   return `
     <div class="row" role="listitem" data-bizid="${escapeAttr(String(id || ""))}">
@@ -1525,10 +1532,7 @@ function recentVisitRow(visit) {
           <div class="meta">${escapeHtml(meta)}</div>
         </div>
         <div class="row-bot">${escapeHtml(summary)}</div>
-        <div class="row-details" ${detailsAttr}>
-          ${detailHtml}
-          ${copyButton}
-        </div>
+        <div class="row-details">${detailHtml}</div>
       </div>
     </div>
   `;
@@ -3180,16 +3184,9 @@ function boot() {
   });
 
   $("#activityList")?.addEventListener("click", (e) => {
-    const copyBtn = e.target.closest(".copy-btn");
-    if (copyBtn) {
-      const payload = decodeCopyText(copyBtn.getAttribute("data-copy") || "");
-      copyToClipboard(payload, copyBtn);
-      return;
-    }
-
-    const details = e.target.closest(".row-details");
-    if (details && details.getAttribute("data-copy")) {
-      const payload = decodeCopyText(details.getAttribute("data-copy") || "");
+    const detailChip = e.target.closest(".detail-chip");
+    if (detailChip) {
+      const payload = decodeCopyText(detailChip.getAttribute("data-copy") || "");
       copyToClipboard(payload);
       return;
     }
