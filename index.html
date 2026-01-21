@@ -11,6 +11,9 @@
     <!-- Header -->
     <header class="wf-header">
       <div class="wf-header-left">
+        <button class="icon-btn avatar-btn" id="btnAvatar" title="Sign in" aria-label="Sign in">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 12a4 4 0 1 0-4-4 4 4 0 0 0 4 4zm0 2c-3.33 0-8 1.67-8 5v1h16v-1c0-3.33-4.67-5-8-5z"/></svg>
+        </button>
         <div class="rep-pill" id="repPill" title="Signed in rep"></div>
       </div>
 
@@ -42,34 +45,10 @@
       </div>
     </header>
 
-    <!-- Sign-in / Main -->
+    <!-- Main -->
     <main class="wf-main">
-      <!-- Sign-in panel -->
-      <section class="panel" id="signinPanel">
-        <div class="panel-top">
-          <div class="chip">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 12a4 4 0 1 0-4-4 4 4 0 0 0 4 4zm0 2c-3.33 0-8 1.67-8 5v1h16v-1c0-3.33-4.67-5-8-5z"/></svg>
-            <span>Rep sign-in</span>
-          </div>
-        </div>
-
-        <div class="signin">
-          <label class="sr-only" for="repCode">3-letter rep code</label>
-          <input id="repCode" maxlength="3" inputmode="latin" autocomplete="off" spellcheck="false"
-                 placeholder="ABC" aria-label="Enter 3-letter rep code" />
-          <button class="primary-btn" id="btnSignIn" aria-label="Sign in">
-            <span class="btn-text">Go</span>
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 17l5-5-5-5v10z"/></svg>
-          </button>
-        </div>
-
-        <div class="preview">
-          <button class="secondary-btn" id="btnExplore" type="button">Browse all activity</button>
-        </div>
-      </section>
-
       <!-- Dashboard panel -->
-      <section class="panel hidden" id="dashPanel">
+      <section class="panel" id="dashPanel">
         <!-- Summary tiles -->
         <div class="tiles">
           <div class="tile" id="tileNew">

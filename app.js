@@ -32,6 +32,9 @@ const DEFAULT_HIDE_GENERIC = true;
 const RECENT_VISIT_LIMIT = 10;
 const POPULAR_PAGES_PAGE_SIZE = 50;
 const POPULAR_PAGES_LIMIT = 5;
+const REP_CODE_LENGTH = 5;
+const REP_CODE_REGEX = /^(?=.*\d)(?=.*[^A-Za-z0-9])\S{5}$/;
+const ACCESS_PASSWORD = "secret123";
 
 const state = {
   repCode: null,
@@ -45,7 +48,7 @@ const state = {
   popularPages: [],
   popularPagesStatus: "idle",
   activityMeta: null,
-  mode: "signed_out",
+  mode: "all",
   assignedSource: "assigned",
   pagesCache: {},
   visitsCache: {},
@@ -61,6 +64,7 @@ const state = {
   rangeStart: null,
   activeTab: "activity",
   showRecentVisits: false,
+  settingsUnlocked: false,
   filters: {
     query: "",
     minVisits: 0,
@@ -119,6 +123,7 @@ function setLoading(isLoading) {
   state.isLoading = !!isLoading;
   const refreshBtn = $("#btnRefresh");
   const signInBtn = $("#btnSignIn");
+  const signInModalBtn = $("#btnSignInModal");
   const signOutBtn = $("#btnSignOut");
   const exploreBtn = $("#btnExplore");
   const rangeSelect = $("#rangeSelect");
@@ -126,6 +131,7 @@ function setLoading(isLoading) {
   const reportsGrid = $("#reportsGrid");
   if (refreshBtn) refreshBtn.disabled = !!isLoading;
   if (signInBtn) signInBtn.disabled = !!isLoading;
+  if (signInModalBtn) signInModalBtn.disabled = !!isLoading;
   if (signOutBtn) signOutBtn.disabled = !!isLoading;
   if (exploreBtn) exploreBtn.disabled = !!isLoading;
   if (rangeSelect) rangeSelect.disabled = !!isLoading;
@@ -136,8 +142,6 @@ function setLoading(isLoading) {
 
 function notify(message, tone = "warn") {
   setStatus(message, tone);
-  const signinVisible = !$("#signinPanel")?.classList.contains("hidden");
-  if (signinVisible) alert(message);
 }
 
 // ---------- date helpers ----------
@@ -358,6 +362,19 @@ function pick(obj, keys, fallback = "") {
 
 function safeUpper(s) {
   return String(s || "").trim().toUpperCase();
+}
+
+function isValidRepCode(code) {
+  return REP_CODE_REGEX.test(String(code || "").trim());
+}
+
+function normalizeRepCode(code, name = "") {
+  const clean = safeUpper(code).replace(/\s+/g, "");
+  if (isValidRepCode(clean)) return clean;
+  const letters = clean.replace(/[^A-Z]/g, "");
+  const nameLetters = safeUpper(name).replace(/[^A-Z]/g, "");
+  const seed = (letters || nameLetters).slice(0, 3).padEnd(3, "X");
+  return `${seed}1!`;
 }
 
 function toNumber(value) {
@@ -728,7 +745,7 @@ function normalizeAssignedUser(user) {
     ],
     ""
   );
-  const code = String(
+  const rawCode = String(
     pick(
       user,
       ["RepCode", "UserCode", "Code", "Initials", "UserInitials", "ShortCode"],
@@ -740,7 +757,7 @@ function normalizeAssignedUser(user) {
   return {
     name,
     id: String(id),
-    code: safeUpper(code || repCodeFromName(name)),
+    code: normalizeRepCode(rawCode || repCodeFromName(name), name),
   };
 }
 
@@ -971,33 +988,7 @@ async function getVisitDetails(visitid) {
 
 // ---------- UI rendering ----------
 function renderSignedOut() {
-  state.mode = "signed_out";
-  state.showRecentVisits = false;
-  state.recentVisits = [];
-  state.popularPages = [];
-  state.popularPagesStatus = "idle";
-  show("#signinPanel");
-  hide("#dashPanel");
-  hide("#repPill");
-  setActiveTab("activity");
-  const repPill = $("#repPill");
-  if (repPill) repPill.innerHTML = "";
-  setListTitle("Assigned activity");
-  const input = $("#repCode");
-  if (input) input.value = "";
-  const refreshBtn = $("#btnRefresh");
-  if (refreshBtn) refreshBtn.disabled = true;
-  const settingsBtn = $("#btnSettings");
-  if (settingsBtn) settingsBtn.disabled = false;
-  const rangeSelect = $("#rangeSelect");
-  if (rangeSelect) rangeSelect.disabled = true;
-  const signOutBtn = $("#btnSignOut");
-  if (signOutBtn) signOutBtn.disabled = true;
-  setActiveTile("visits");
-  updateSortToggleLabel();
-  setText("#valNew", "0");
-  setText("#valVisits", "0");
-  setText("#valReturning", "0");
+  renderExplore();
 }
 
 function renderSignedIn() {
@@ -1947,7 +1938,7 @@ function findIpValue(obj, depth = 0) {
 async function unlockIpAccess() {
   const input = $("#ipPassword");
   const value = input ? input.value.trim() : "";
-  if (value !== "secret123") {
+  if (value !== ACCESS_PASSWORD) {
     setStatus("Incorrect IP password", "bad");
     if (input) {
       input.value = "";
@@ -2907,7 +2898,7 @@ function loadSession() {
   }
 
   if (repCode && repName && clientUserId) {
-    state.repCode = repCode;
+    state.repCode = normalizeRepCode(repCode, repName);
     state.repName = repName;
     state.clientUserId = clientUserId;
     return true;
@@ -2944,6 +2935,7 @@ function clearSession() {
   state.visitDetailsCache = {};
   state.visitIpCache = {};
   state.ipUnlocked = false;
+  state.settingsUnlocked = false;
   state.longRangeTopCompanies = null;
   state.rangeStart = null;
   state.showRecentVisits = false;
@@ -3060,12 +3052,24 @@ async function refresh() {
 }
 
 // ---------- events ----------
-async function onSignIn() {
+async function onSignIn(rawOverride = "", closeOnSuccess = false) {
   const codeInput = $("#repCode");
-  const raw = codeInput ? codeInput.value : "";
-  const code = safeUpper(raw);
+  const raw = rawOverride || (codeInput ? codeInput.value : "");
+  const trimmed = String(raw || "").trim();
+  const code = safeUpper(trimmed);
 
-  if (!code || code.length !== 3) return notify("Enter your 3-letter rep code.");
+  if (!isValidRepCode(trimmed)) {
+    const modalInput = $("#repCodeModal");
+    if (modalInput) {
+      modalInput.focus();
+      modalInput.select();
+    }
+    if (codeInput) {
+      codeInput.focus();
+      codeInput.select();
+    }
+    return notify("Enter a 5-character code with at least one number and one special character.");
+  }
 
   setLoading(true);
   try {
@@ -3083,7 +3087,7 @@ async function onSignIn() {
     const match = findAssignedUserByCode(users, code);
 
     if (!match) {
-      notify("No matching rep found. Use View codes to confirm your code.");
+      notify("No matching rep found. Use Settings to view rep codes.");
       return;
     }
 
@@ -3094,6 +3098,7 @@ async function onSignIn() {
     saveSession();
     renderSignedIn();
     await refresh();
+    if (closeOnSuccess) closeModal();
   } catch (e) {
     console.error(e);
     notify(e.message || "Sign-in failed.", "bad");
@@ -3104,13 +3109,13 @@ async function onSignIn() {
 
 function onSignOut() {
   if (state.mode === "all") {
-    renderSignedOut();
     state.pagesCache = {};
     state.visitsCache = {};
     state.visitStatsCache = {};
     state.visitDetailsCache = {};
     state.visitIpCache = {};
     state.ipUnlocked = false;
+    state.settingsUnlocked = false;
     state.longRangeTopCompanies = null;
     state.businesses = [];
     state.reportBusinesses = [];
@@ -3123,6 +3128,8 @@ function onSignOut() {
     if (grid) grid.innerHTML = "";
     updateListCount(0, 0);
     clearFilters();
+    renderExplore();
+    refresh().catch(() => {});
     setStatus("Ready", "good");
     return;
   }
@@ -3133,19 +3140,21 @@ function onSignOut() {
   state.visitDetailsCache = {};
   state.visitIpCache = {};
   state.ipUnlocked = false;
+  state.settingsUnlocked = false;
   state.longRangeTopCompanies = null;
   state.businesses = [];
   state.reportBusinesses = [];
   state.popularPages = [];
   state.popularPagesStatus = "idle";
   state.activityMeta = null;
-  renderSignedOut();
+  renderExplore();
   const wrap = $("#activityList");
   if (wrap) wrap.innerHTML = "";
   const grid = $("#reportsGrid");
   if (grid) grid.innerHTML = "";
   updateListCount(0, 0);
   clearFilters();
+  refresh().catch(() => {});
   setStatus("Ready", "good");
 }
 
@@ -3183,6 +3192,7 @@ async function onExplore() {
     state.visitDetailsCache = {};
     state.visitIpCache = {};
     state.ipUnlocked = false;
+    state.settingsUnlocked = false;
     state.longRangeTopCompanies = null;
     renderExplore();
     await refresh();
@@ -3192,6 +3202,32 @@ async function onExplore() {
   } finally {
     setLoading(false);
   }
+}
+
+function showSignInModal() {
+  const title = state.repName ? "Switch rep" : "Sign in";
+  const currentRep = state.repName
+    ? `<div class="form-hint">Signed in as ${escapeHtml(state.repName)}.</div>`
+    : "";
+  const body = `
+    <div class="modal-form">
+      <label for="repCodeModal">Rep access code</label>
+      <input id="repCodeModal" maxlength="${REP_CODE_LENGTH}" inputmode="text" autocomplete="off"
+             spellcheck="false" placeholder="A1!BC" aria-label="Enter 5-character rep code" />
+      <div class="form-hint">5 characters, include at least one number and one special character.</div>
+      ${currentRep}
+      <div class="modal-actions">
+        <button class="primary-btn" id="btnSignInModal" type="button">Sign in</button>
+      </div>
+    </div>
+  `;
+  openModal(title, body);
+  const input = $("#repCodeModal");
+  if (input) input.focus();
+  $("#btnSignInModal")?.addEventListener("click", () => onSignIn(input?.value || "", true));
+  $("#repCodeModal")?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") onSignIn(input?.value || "", true);
+  });
 }
 
 async function showCodesModal() {
@@ -3226,6 +3262,45 @@ async function showCodesModal() {
   } finally {
     setLoading(false);
   }
+}
+
+function unlockSettingsAccess() {
+  const input = $("#settingsPassword");
+  const value = input ? input.value.trim() : "";
+  if (value !== ACCESS_PASSWORD) {
+    setStatus("Incorrect settings password", "bad");
+    if (input) {
+      input.value = "";
+      input.focus();
+    }
+    return;
+  }
+  state.settingsUnlocked = true;
+  showCodesModal();
+}
+
+function showSettingsModal() {
+  if (state.settingsUnlocked) {
+    showCodesModal();
+    return;
+  }
+  const body = `
+    <div class="modal-form">
+      <label for="settingsPassword">Settings password</label>
+      <div class="ip-row">
+        <input id="settingsPassword" type="password" placeholder="Enter password" />
+        <button class="secondary-btn small" id="btnUnlockSettings" type="button">Unlock</button>
+      </div>
+      <div class="form-hint">Required to view rep codes.</div>
+    </div>
+  `;
+  openModal("Settings", body);
+  const input = $("#settingsPassword");
+  if (input) input.focus();
+  $("#btnUnlockSettings")?.addEventListener("click", () => unlockSettingsAccess());
+  $("#settingsPassword")?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") unlockSettingsAccess();
+  });
 }
 
 function showAccountModal() {
@@ -3270,16 +3345,11 @@ function escapeAttr(s) {
 
 // ---------- boot ----------
 function boot() {
-  $("#btnSignIn")?.addEventListener("click", onSignIn);
-  $("#repCode")?.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") onSignIn();
-  });
-  $("#btnExplore")?.addEventListener("click", onExplore);
+  $("#btnAvatar")?.addEventListener("click", showSignInModal);
   $("#btnSignOut")?.addEventListener("click", onSignOut);
   $("#btnRefresh")?.addEventListener("click", refresh);
   $("#rangeSelect")?.addEventListener("change", onRangeChange);
-  $("#btnShowCodes")?.addEventListener("click", showCodesModal);
-  $("#btnSettings")?.addEventListener("click", showAccountModal);
+  $("#btnSettings")?.addEventListener("click", showSettingsModal);
   $("#btnFilter")?.addEventListener("click", focusRangeSelect);
   $("#btnCloseModal")?.addEventListener("click", closeModal);
   $("#searchInput")?.addEventListener("input", onFiltersChange);
@@ -3313,7 +3383,8 @@ function boot() {
     renderSignedIn();
     refresh().catch(() => {});
   } else {
-    renderSignedOut();
+    renderExplore();
+    refresh().catch(() => {});
   }
 }
 

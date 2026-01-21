@@ -57,6 +57,7 @@ html,body{height:100%; margin:0; background:transparent; font-family:var(--font)
   flex:1;
   display:flex;
   align-items:center;
+  gap:6px;
 }
 .wf-header-right{
   display:flex;
@@ -87,6 +88,12 @@ html,body{height:100%; margin:0; background:transparent; font-family:var(--font)
 .icon-btn svg{width:18px; height:18px; fill:var(--ink-strong);}
 .icon-btn.subtle{background:transparent;}
 .icon-btn:disabled{opacity:.45; cursor:not-allowed; transform:none;}
+.avatar-btn{
+  border-radius:999px;
+  background: linear-gradient(135deg, rgba(42,91,215,.18), rgba(17,136,95,.18));
+  border-color: rgba(15,23,42,.22);
+}
+.avatar-btn svg{width:16px; height:16px;}
 
 .wf-main{
   flex:1;
@@ -794,6 +801,15 @@ select{
   gap:8px;
   margin:6px 0 8px;
 }
+.modal-form{
+  display:flex;
+  flex-direction:column;
+  gap:8px;
+}
+.form-hint{
+  font-size:10px;
+  color: var(--muted2);
+}
 .options{
   display:flex;
   flex-direction:column;
@@ -1087,6 +1103,7 @@ select{
   }
   .select.small{min-width:96px;}
   .toggle{padding:3px 6px; font-size:10px;}
+  .avatar-btn{border-radius:999px;}
   .list{padding:4px;}
   .row{padding:6px;}
   .row-top{
@@ -1164,6 +1181,7 @@ select{
   }
   .select.small{min-width:96px;}
   .toggle{padding:3px 6px; font-size:10px;}
+  .avatar-btn{border-radius:999px;}
   .list{padding:4px;}
   .row{padding:6px;}
   .row-top{
