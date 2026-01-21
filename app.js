@@ -411,6 +411,119 @@ function getBusinessLocation(business) {
   return [city, stateProv, country].filter(Boolean).join(", ");
 }
 
+const US_STATE_ABBREV = {
+  "ALABAMA": "AL",
+  "ALASKA": "AK",
+  "ARIZONA": "AZ",
+  "ARKANSAS": "AR",
+  "CALIFORNIA": "CA",
+  "COLORADO": "CO",
+  "CONNECTICUT": "CT",
+  "DELAWARE": "DE",
+  "FLORIDA": "FL",
+  "GEORGIA": "GA",
+  "HAWAII": "HI",
+  "IDAHO": "ID",
+  "ILLINOIS": "IL",
+  "INDIANA": "IN",
+  "IOWA": "IA",
+  "KANSAS": "KS",
+  "KENTUCKY": "KY",
+  "LOUISIANA": "LA",
+  "MAINE": "ME",
+  "MARYLAND": "MD",
+  "MASSACHUSETTS": "MA",
+  "MICHIGAN": "MI",
+  "MINNESOTA": "MN",
+  "MISSISSIPPI": "MS",
+  "MISSOURI": "MO",
+  "MONTANA": "MT",
+  "NEBRASKA": "NE",
+  "NEVADA": "NV",
+  "NEW HAMPSHIRE": "NH",
+  "NEW JERSEY": "NJ",
+  "NEW MEXICO": "NM",
+  "NEW YORK": "NY",
+  "NORTH CAROLINA": "NC",
+  "NORTH DAKOTA": "ND",
+  "OHIO": "OH",
+  "OKLAHOMA": "OK",
+  "OREGON": "OR",
+  "PENNSYLVANIA": "PA",
+  "RHODE ISLAND": "RI",
+  "SOUTH CAROLINA": "SC",
+  "SOUTH DAKOTA": "SD",
+  "TENNESSEE": "TN",
+  "TEXAS": "TX",
+  "UTAH": "UT",
+  "VERMONT": "VT",
+  "VIRGINIA": "VA",
+  "WASHINGTON": "WA",
+  "WEST VIRGINIA": "WV",
+  "WISCONSIN": "WI",
+  "WYOMING": "WY",
+  "DISTRICT OF COLUMBIA": "DC",
+  "WASHINGTON DC": "DC",
+  "WASHINGTON D C": "DC",
+};
+
+function normalizeCountryName(country) {
+  const clean = String(country || "").trim();
+  if (!clean) return "";
+  const lower = clean.toLowerCase();
+  if (
+    lower === "united states" ||
+    lower === "united states of america" ||
+    lower === "u.s." ||
+    lower === "u.s.a." ||
+    lower === "usa" ||
+    lower === "us" ||
+    lower === "u.s"
+  ) {
+    return "USA";
+  }
+  if (lower === "united kingdom" || lower === "u.k." || lower === "uk") {
+    return "UK";
+  }
+  return clean;
+}
+
+function normalizeStateAbbrev(state, country) {
+  const clean = String(state || "").trim();
+  if (!clean) return "";
+  const key = clean.toUpperCase().replace(/\./g, "").replace(/\s+/g, " ").trim();
+  if (/^[A-Z]{2}$/.test(key)) return key;
+  if (country === "USA") return US_STATE_ABBREV[key] || clean;
+  if (US_STATE_ABBREV[key]) return US_STATE_ABBREV[key];
+  return clean;
+}
+
+function parseCityState(value) {
+  const clean = String(value || "").trim();
+  if (!clean) return { city: "", state: "" };
+  const parenMatch = clean.match(/^(.*?)(?:\s*\(([^)]+)\))\s*$/);
+  if (parenMatch) return { city: parenMatch[1].trim(), state: parenMatch[2].trim() };
+  const commaMatch = clean.match(/^(.*?),\s*([A-Za-z]{2})$/);
+  if (commaMatch) return { city: commaMatch[1].trim(), state: commaMatch[2].trim() };
+  return { city: clean, state: "" };
+}
+
+function formatBusinessLocation(business) {
+  const rawCity = pick(business, ["City", "Town", "Locality", "LocationCity"], "");
+  const rawState = pick(
+    business,
+    ["State", "StateName", "StateProvince", "Region", "County", "Province", "ProvinceName"],
+    ""
+  );
+  const rawCountry = pick(business, ["Country", "CountryName"], "");
+
+  const parsed = parseCityState(rawCity);
+  const country = normalizeCountryName(rawCountry);
+  const state = normalizeStateAbbrev(parsed.state || rawState, country);
+  const parts = [parsed.city, state, country].filter(Boolean);
+  return parts.join(", ");
+}
+
 function getBusinessState(business) {
   return pick(
     business,
@@ -1438,7 +1551,7 @@ function getFilteredRecentVisits(list) {
 
 function activityRow(business) {
   const name = getBusinessName(business);
-  const loc = getBusinessLocation(business);
+  const loc = formatBusinessLocation(business);
   const info = buildCompanyInfo(business);
 
   const lastVisitDate = getLastVisitDate(business);
@@ -1449,12 +1562,12 @@ function activityRow(business) {
   const metaParts = [];
   if (visits) metaParts.push(`${visits} visit${visits === 1 ? "" : "s"}`);
   if (pages) metaParts.push(`${pages} page${pages === 1 ? "" : "s"}`);
-  const meta = metaParts.join(" | ");
 
-  const summaryParts = [];
-  if (loc) summaryParts.push(loc);
-  if (lastVisit) summaryParts.push(lastVisit);
-  const summary = summaryParts.join(" | ");
+  const detailParts = [];
+  if (loc) detailParts.push(loc);
+  if (lastVisit) detailParts.push(lastVisit);
+  detailParts.push(...metaParts);
+  const summary = detailParts.join(" | ");
 
   const id = pick(business, ["BusinessID", "BusinessId", "ID", "Id"], "");
   const isNew = state.rangeStart ? isNewBusiness(business, state.rangeStart) : false;
@@ -1476,7 +1589,6 @@ function activityRow(business) {
             )}" title="View activity">${escapeHtml(name)}</button>
             ${tag}
           </div>
-          <div class="meta">${escapeHtml(meta)}</div>
         </div>
         <div class="row-bot">${escapeHtml(summary)}</div>
         <div class="row-details">${detailHtml}</div>
@@ -1488,7 +1600,7 @@ function activityRow(business) {
 function recentVisitRow(visit) {
   const business = getBusinessForVisit(visit);
   const name = business ? getBusinessName(business) : "Unknown Company";
-  const loc = business ? getBusinessLocation(business) : "";
+  const loc = business ? formatBusinessLocation(business) : "";
   const info = buildCompanyInfo(
     business || { BusinessID: getVisitBusinessId(visit), Name: name }
   );
@@ -1501,11 +1613,11 @@ function recentVisitRow(visit) {
   const metaParts = ["1 visit"];
   if (pages) metaParts.push(`${pages} page${pages === 1 ? "" : "s"}`);
   if (ipText) metaParts.push(ipText);
-  const meta = metaParts.join(" | ");
 
   const summaryParts = [];
   if (loc) summaryParts.push(loc);
   if (visitTime) summaryParts.push(visitTime);
+  summaryParts.push(...metaParts);
   const summary = summaryParts.join(" | ");
 
   const id = business ? getBusinessId(business) : getVisitBusinessId(visit);
@@ -1529,7 +1641,6 @@ function recentVisitRow(visit) {
             )}" title="View activity">${escapeHtml(name)}</button>
             ${tag}
           </div>
-          <div class="meta">${escapeHtml(meta)}</div>
         </div>
         <div class="row-bot">${escapeHtml(summary)}</div>
         <div class="row-details">${detailHtml}</div>
