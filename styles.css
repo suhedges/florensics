@@ -335,6 +335,11 @@ select{
   display:flex; align-items:center; justify-content:space-between;
   margin:6px 0 6px;
 }
+.list-actions{
+  display:flex;
+  align-items:center;
+  gap:6px;
+}
 .list-title{font-weight:750; font-size:12px; color: var(--ink-strong);}
 .list-count{
   margin-left:6px;

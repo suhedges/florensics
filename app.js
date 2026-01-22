@@ -683,6 +683,13 @@ function getFilteredBusinesses(list) {
 function sortBusinesses(list) {
   const mode = state.filters.sort || "visits";
   const sorted = [...list];
+  if (mode === "alpha") {
+    return sorted.sort((a, b) =>
+      getBusinessName(a).localeCompare(getBusinessName(b), undefined, {
+        sensitivity: "base",
+      })
+    );
+  }
   if (mode === "pages") {
     return sorted.sort((a, b) => {
       const diff = getPageCount(b) - getPageCount(a);
@@ -704,6 +711,9 @@ function sortBusinesses(list) {
       const bd = getLastVisitDate(b)?.getTime() || 0;
       return bd - ad;
     });
+  }
+  if (mode === "activity") {
+    return sorted.sort(activitySort);
   }
   return sorted.sort(activitySort);
 }
@@ -1266,6 +1276,7 @@ function updateFilterSummary() {
 
 function sortLabel() {
   if (state.filters.sort === "pages") return "Pages";
+  if (state.filters.sort === "alpha") return "A-Z";
   if (state.filters.sort === "activity") return "Visits + Pages";
   return "Visits";
 }
@@ -1281,7 +1292,9 @@ function updateSortToggleLabel() {
 function toggleSortMode() {
   if (state.mode === "all") state.showRecentVisits = false;
   const current = state.filters.sort || "visits";
-  const next = current === "visits" ? "pages" : current === "pages" ? "activity" : "visits";
+  const order = ["visits", "pages", "alpha"];
+  const idx = order.indexOf(current);
+  const next = idx === -1 ? order[0] : order[(idx + 1) % order.length];
   state.filters.sort = next;
   updateActivityView();
 }
@@ -1427,15 +1440,21 @@ function openLocationFilterModal() {
   const statesForCountry =
     selectedCountry && locationOptions.statesByCountry.has(selectedCountry)
       ? locationOptions.statesByCountry.get(selectedCountry) || []
-      : locationOptions.states;
-  const selectedState = statesForCountry.includes(state.filters.state)
-    ? state.filters.state
-    : "";
+      : [];
+  const selectedState =
+    selectedCountry && statesForCountry.includes(state.filters.state)
+      ? state.filters.state
+      : "";
 
   const countryOptions = buildSelectOptions(locationOptions.countries, selectedCountry);
   const stateOptions = buildSelectOptions(statesForCountry, selectedState);
   const countryDisabled = hasCountries ? "" : "disabled";
-  const stateDisabled = hasStates ? "" : "disabled";
+  const stateDisabled = selectedCountry && statesForCountry.length ? "" : "disabled";
+  const statePlaceholder = selectedCountry
+    ? statesForCountry.length
+      ? "All states"
+      : "No states available"
+    : "Select country first";
 
   const bodyHtml = `
     <div class="modal-form">
@@ -1450,7 +1469,7 @@ function openLocationFilterModal() {
       <label for="locationState">State / Region</label>
       <div class="select small">
         <select id="locationState" ${stateDisabled}>
-          <option value="">All states</option>
+          <option value="">${escapeHtml(statePlaceholder)}</option>
           ${stateOptions}
         </select>
         <svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10l5 5 5-5z"/></svg>
@@ -1472,13 +1491,17 @@ function openLocationFilterModal() {
     const states =
       country && locationOptions.statesByCountry.has(country)
         ? locationOptions.statesByCountry.get(country) || []
-        : locationOptions.states;
+        : [];
     const selected = states.includes(stateSelect.value) ? stateSelect.value : "";
-    stateSelect.innerHTML = `<option value="">All states</option>${buildSelectOptions(
-      states,
-      selected
-    )}`;
-    stateSelect.disabled = states.length === 0;
+    const placeholder = country
+      ? states.length
+        ? "All states"
+        : "No states available"
+      : "Select country first";
+    stateSelect.innerHTML = `<option value="">${escapeHtml(
+      placeholder
+    )}</option>${buildSelectOptions(states, selected)}`;
+    stateSelect.disabled = !country || states.length === 0;
     stateSelect.value = selected;
   };
 
@@ -1499,11 +1522,11 @@ function openLocationFilterModal() {
     const states =
       country && locationOptions.statesByCountry.has(country)
         ? locationOptions.statesByCountry.get(country) || []
-        : locationOptions.states;
+        : [];
     const nextState =
-      stateSelect && states.includes(stateSelect.value) ? stateSelect.value : "";
+      country && stateSelect && states.includes(stateSelect.value) ? stateSelect.value : "";
     state.filters.country = country;
-    state.filters.state = nextState;
+    state.filters.state = country ? nextState : "";
     if (state.mode === "all") state.showRecentVisits = false;
     closeModal();
     updateActivityView();
